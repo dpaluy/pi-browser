@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Diagnostics station</title></head>
+<body>
+  <h1>Diagnostics station</h1>
+  <button id="request">Fetch parcel</button>
+  <output id="done">waiting</output>
+  <script>
+    document.querySelector('#request').onclick = async () => {
+      console.log('parcel requested');
+      const response = await fetch('/api/parcel', { headers: { 'X-Fixture-Request': 'request-header-secret' } });
+      await response.text();
+      document.querySelector('#done').value = 'parcel received';
+      setTimeout(() => { throw new Error('parcel fixture exception'); });
+    };
+  </script>
+</body>
+</html>

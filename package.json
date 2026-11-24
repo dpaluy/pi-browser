@@ -1,0 +1,35 @@
+{
+  "name": "@dpaluy/pi-browser",
+  "version": "0.1.0",
+  "description": "Let Pi work in your signed-in Chrome or Brave, in tabs of its own, in the background.",
+  "type": "module",
+  "license": "MIT",
+  "author": "David Paluy",
+  "keywords": ["pi-package", "pi-extension", "chrome", "brave", "browser"],
+  "repository": { "type": "git", "url": "git+https://github.com/dpaluy/pi-browser.git" },
+  "homepage": "https://github.com/dpaluy/pi-browser#readme",
+  "bugs": { "url": "https://github.com/dpaluy/pi-browser/issues" },
+  "files": ["src/", "host/", "extension/", "CHANGELOG.md"],
+  "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org/" },
+  "pi": { "extensions": ["./src/index.ts"] },
+  "engines": { "node": ">=22.19.0" },
+  "scripts": {
+    "version": "node -e \"const fs=require('fs'),f='extension/manifest.json',m=JSON.parse(fs.readFileSync(f));m.version=process.env.npm_package_version;fs.writeFileSync(f,JSON.stringify(m,null,2)+'\\n')\"",
+    "check": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "e2e": "node --test --test-concurrency=1 --test-timeout=90000 test/e2e/*.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.6.0",
+    "@earendil-works/pi-tui": "1.6.0",
+    "@puppeteer/browsers": "3.2.7",
+    "@types/node": "^22.0.0",
+    "typebox": "1.4.7",
+    "typescript": "^5.9.0"
+  }
+}

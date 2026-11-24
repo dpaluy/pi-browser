@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><title>Pi controls</title>
+</head>
+<body>
+  <main>
+    <h1>Create your account</h1>
+    <form id="signup">
+      <label>Email address <input id="email" type="email" value="old@example.com"></label>
+      <label>Country <select id="country"><option value="">Choose</option><option value="ca">Canada</option><option value="fr">France</option><option value="jp" disabled>Japan</option></select></label>
+      <label>Toppings <select id="toppings" multiple><option>Cheese</option><option>Olives</option><option>Basil</option></select></label>
+      <label><input id="news" type="checkbox"> Subscribe to newsletter</label>
+      <label>Birthday <input id="birthday" type="date"></label>
+      <div role="switch" id="dark" aria-checked="false" tabindex="0" aria-label="Dark mode">Dark mode</div>
+      <label>Avatar <input id="avatar" type="file"></label>
+      <button type="button" id="attach">Attach documents</button>
+      <input id="documents" type="file" multiple hidden>
+      <button type="submit">Create account</button>
+    </form>
+    <p id="state">nothing yet</p>
+    <p id="files">no files</p>
+    <button id="later">Show message later</button>
+    <p id="message"></p>
+    <ul>
+      <li>Blue mug <button>Delete</button></li>
+      <li>Red kettle <button>Delete</button></li>
+    </ul>
+    <p>Shipping is free on orders over $50.</p>
+  </main>
+  <script>
+    const show = () => state.textContent = JSON.stringify({
+      email: email.value, country: country.value, toppings: [...toppings.selectedOptions].map(option => option.value),
+      news: news.checked, birthday: birthday.value, dark: dark.getAttribute("aria-checked"),
+    });
+    for (const element of [email, country, toppings, news, birthday]) element.addEventListener("change", show);
+    email.addEventListener("input", show);
+    dark.onclick = () => { dark.setAttribute("aria-checked", String(dark.getAttribute("aria-checked") !== "true")); show(); };
+    signup.onsubmit = event => { event.preventDefault(); state.textContent = `submitted ${state.textContent}`; };
+    attach.onclick = () => documents.click();
+    const listFiles = input => files.textContent = `${input.id}: ${[...input.files].map(file => `${file.name} ${file.size}`).join(", ")}`;
+    avatar.onchange = () => listFiles(avatar);
+    documents.onchange = () => listFiles(documents);
+    later.onclick = () => setTimeout(() => { message.textContent = "Your order shipped"; }, 700);
+  </script>
+</body>
+</html>

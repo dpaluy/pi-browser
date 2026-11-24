@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><title>Pointer workshop</title>
+  <style>
+    body { display: flow-root; margin: 0; font: 16px sans-serif; background: #199154; }
+    main { margin: 44px 24px 8px; padding: 16px; width: 560px; background: white; }
+    section { margin: 12px 0; }
+    #covered-area, #label-area { display: inline-block; position: relative; width: 170px; height: 30px; }
+    #covered, #cover, #label-area label { position: absolute; inset: 0; width: 100%; }
+    #label-area input { position: absolute; left: 70px; top: 6px; }
+    #label-area label { background: #eee; }
+    #hover-menu:not(:hover) #menu-entry { visibility: hidden; }
+    #hover-menu { background: #ddd; width: 150px; height: 50px; }
+    #canvas { background: #cde; vertical-align: middle; }
+    #panel { width: 200px; height: 100px; overflow: auto; border: 1px solid black; }
+    #panel div { height: 500px; }
+    #source, #drop { display: inline-block; margin-right: 30px; padding: 20px; background: #ddd; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Pointer workshop</h1>
+    <section>
+      <div id="covered-area"><button id="covered">Hidden target</button><button id="cover">Blocking banner</button></div>
+      <div id="label-area"><input id="toggle" type="checkbox"><label for="toggle">Overlay label</label></div>
+    </section>
+    <section>
+      <button id="alert">Open alert</button>
+      <button id="pulse">Paint blue</button>
+      <output id="count">0</output>
+    </section>
+    <section id="hover-menu">Hover menu<div id="menu-entry" role="menuitem">Nested entry</div></section>
+    <section><canvas id="canvas" width="260" height="70" aria-label="Drawing pad"></canvas></section>
+    <section id="panel"><div>Scrollable panel</div></section>
+    <section><div draggable="true" id="source">Parcel</div><div id="drop">Drop zone</div></section>
+    <output id="drop-result"></output>
+  </main>
+  <script>
+    const el = id => document.getElementById(id);
+    window.pointerLog = [];
+    const canvas = el('canvas');
+    for (const type of ['pointerdown', 'pointermove', 'pointerup']) {
+      canvas.addEventListener(type, e => {
+        if (type !== 'pointermove' || e.buttons) window.pointerLog.push([type, e.offsetX, e.offsetY]);
+      });
+    }
+    el('alert').onclick = () => alert('Please acknowledge the fixture');
+    el('pulse').onclick = () => {
+      el('count').value = Number(el('count').value) + 1;
+      document.body.style.background = '#184ad4';
+    };
+    el('covered').onclick = () => { el('count').value = 'wrong target'; };
+    el('cover').onclick = () => { el('count').value = 'wrong cover'; };
+    el('source').ondragstart = event => event.dataTransfer.setData('text/plain', 'fixture parcel');
+    el('drop').ondragover = event => event.preventDefault();
+    el('drop').ondrop = event => {
+      event.preventDefault();
+      el('drop-result').value = event.dataTransfer.getData('text/plain');
+    };
+  </script>
+</body>
+</html>
