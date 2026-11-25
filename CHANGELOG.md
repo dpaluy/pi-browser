@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2 - 2026-11-24
+
+### Changed
+
+- Tab group titles start with `π ·`. Unnamed sessions show up to 10 characters of the project folder name and no session ID.
+
 ## 0.2.1 - 2026-11-24
 
 ### Changed

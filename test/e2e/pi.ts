@@ -141,8 +141,8 @@ export async function setup(t: TestContext, settings?: Partial<BrowserSettings>,
   });
   return {
     ...browser,
-    async session(name = "Fixture operator") {
-      const session = fakePi(name, browser.root, t.signal);
+    async session(name = "Fixture operator", cwd = browser.root) {
+      const session = fakePi(name, cwd, t.signal);
       sessions.push(session);
       await browserExtension({ agentDir: browser.agentDir, browserDirs: [browser.profileDir], connectTimeoutMs: 20_000 })(session.pi);
       await session.start();

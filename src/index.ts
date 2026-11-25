@@ -18,10 +18,9 @@ const STATUS_WAIT_MS = 5_000;
 
 const interactive = (ctx: ExtensionContext) => ctx.hasUI && ctx.mode === "tui";
 
-// The tab group shows the session's name, or for an unnamed session its project folder and the start of its ID,
-// so two unnamed sessions in one folder stay distinguishable.
-export function groupName(session: Pick<ExtensionContext["sessionManager"], "getSessionId" | "getSessionName" | "getCwd">): string {
-  return session.getSessionName() || `${basename(session.getCwd()) || session.getCwd()} · ${session.getSessionId().slice(0, 4)}`;
+export function groupName(session: Pick<ExtensionContext["sessionManager"], "getSessionName" | "getCwd">): string {
+  const cwd = session.getCwd();
+  return session.getSessionName() || Array.from(basename(cwd) || cwd).slice(0, 10).join("");
 }
 
 export function browserExtension(options: BrowserOptions = {}): (pi: ExtensionAPI) => void {

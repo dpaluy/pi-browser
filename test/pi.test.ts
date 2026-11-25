@@ -319,13 +319,12 @@ test("/browser <task> asks the agent to do the task with the browser tool", { ti
   assert.deepEqual(app.notifications, []);
 });
 
-test("tab group name: project folder and short ID until the session is named", { timeout: 8000 }, async t => {
+test("tab group name: first 10 characters of the project folder until the session is named", { timeout: 8000 }, async t => {
   const root = await fixture(t, false);
   const app = await pi(t, root);
   const requests = await browserPeer(t, app, () => reply());
   await app.call("read");
-  const id = app.session.sessionManager.getSessionId();
-  assert.equal(requests.at(-1)?.name, `${basename(root)} · ${id.slice(0, 4)}`);
+  assert.equal(requests.at(-1)?.name, basename(root).slice(0, 10));
   app.session.sessionManager.appendSessionInfo("LinkedIn research");
   await app.call("read");
   assert.equal(requests.at(-1)?.name, "LinkedIn research");

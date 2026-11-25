@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { lstat, readFile } from "node:fs/promises";
+import { lstat, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { escapeRE, tabId } from "./assertions.ts";
@@ -26,7 +26,7 @@ test("navigate creates a background tab in the named group; tabs counts and refu
     const tab = await chrome.tabs.get(${id});
     return { title: (await chrome.tabGroups.get(tab.groupId)).title, active: tab.active, windowId: tab.windowId };
   })()`);
-  assert.deepEqual(group, { title: "pi · Field notes", active: false, windowId: outside.windowId });
+  assert.deepEqual(group, { title: "π · Field notes", active: false, windowId: outside.windowId });
   assert.equal(await h.worker(`chrome.tabs.get(${outside.id}).then(t=>t.active)`), true);
   assert(!((await h.worker<number[]>("globalThis.fixtureActivations")).includes(id)), "The new tab was briefly activated");
   const others = await h.worker<number>(`chrome.tabs.query({}).then(tabs=>tabs.filter(t=>t.id!==${id}).length)`);
@@ -102,10 +102,12 @@ test("a redirect to a different host prompts again and does not leak the denied 
   assert.doesNotMatch(list, /private\.html|Confidential/);
 });
 
-test("sessions own distinct groups and grants; shutdown ends the group without closing its tabs", async t => {
+test("unnamed sessions in one folder share a shortened title but not groups or grants; shutdown leaves tabs open", async t => {
   const h = await setup(t);
-  const a = await h.session("Research");
-  const b = await h.session("Review");
+  const cwd = join(h.root, "project-folder");
+  await mkdir(cwd);
+  const a = await h.session("", cwd);
+  const b = await h.session("", cwd);
   const aUrl = h.url();
   const bUrl = h.url("/interaction.html");
   const aId = tabId((await a.call("navigate", { url: aUrl }, ["Allow for this session"])).text, "Pi controls", aUrl);
@@ -113,8 +115,8 @@ test("sessions own distinct groups and grants; shutdown ends the group without c
   const groupFor = (id: number) => h.worker<{ id: number; title: string }>(`chrome.tabs.get(${id}).then(t=>chrome.tabGroups.get(t.groupId))`);
   const [aGroup, bGroup] = await Promise.all([groupFor(aId), groupFor(bId)]);
   assert.notEqual(aGroup.id, bGroup.id);
-  assert.equal(aGroup.title, "pi · Research");
-  assert.equal(bGroup.title, "pi · Review");
+  assert.equal(aGroup.title, "π · project-fo");
+  assert.equal(bGroup.title, "π · project-fo");
   assert.equal((await a.call("read", { tabId: bId })).text, `Tab ${bId} is not in your group.`);
   assert.equal((await b.call("close", { tabId: aId })).text, `Tab ${aId} is not in your group.`);
 
@@ -122,7 +124,7 @@ test("sessions own distinct groups and grants; shutdown ends the group without c
   assert((await lstat(socket)).isSocket());
   await a.shutdown();
   await assert.rejects(lstat(socket), { code: "ENOENT" });
-  await waitUntil("ended group title", async () => (await groupFor(aId)).title === "pi · Research (ended)" ? true : undefined);
+  await waitUntil("ended group title", async () => (await groupFor(aId)).title === "π · project-fo (ended)" ? true : undefined);
   assert.equal((await groupFor(aId)).id, aGroup.id);
   assert.equal(await h.page(aUrl, "document.title"), "Pi controls");
   assert.match((await b.call("read")).text, /Pointer workshop/);

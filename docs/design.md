@@ -17,7 +17,7 @@ Pi session C ──┘  <agentDir>/browser/sockets/<id>.sock     started by the 
 | Extension ID | `odhaeafpfooplfbcefglfcmlpbedofdo` (fixed by `key` in `extension/manifest.json`) |
 | Native host name | `dev.majesticlabs.pi_browser` |
 | Pi data folder | `<agentDir>/browser/` with `settings.json` and `sockets/` (`agentDir` from `getAgentDir()`) |
-| Tab group title | `pi · <name>`; `pi · <name> (ended)` after the session exits. `<name>` is the session name, or for an unnamed session `<basename of cwd> · <first 4 characters of the session ID>` (`groupName` in `src/index.ts`) |
+| Tab group title | `π · <name>`; `π · <name> (ended)` after the session exits. `<name>` is the session name, or for an unnamed session the first 10 characters of the working folder's name (the root path itself at a filesystem root), without a session ID (`groupName` in `src/index.ts`). Sessions may share a title but still have separate groups. |
 
 ## Files
 
@@ -64,7 +64,7 @@ closed.
 Messages the relay delivers to Pi come from the extension. Messages Pi writes go to the extension.
 
 ```
-ext → pi   {"hello":{"protocol":1,"extension":"0.2.1","browser":"Chrome/141.0…","on":true}}
+ext → pi   {"hello":{"protocol":1,"extension":"0.2.2","browser":"Chrome/141.0…","on":true}}
 ext → pi   {"state":{"on":false}}                       sent to every connected session when the user toggles
 pi  → ext  {"hello":{"protocol":1,"session":"<id>","name":"<session name>"}}
 pi  → ext  {"id":7,"method":"click","params":{...},"allowed":["example.com"],"name":"<session name>"}
@@ -88,7 +88,7 @@ Chrome frames stdio messages as a 4-byte little-endian length plus UTF-8 JSON. M
 
 ```
 ext   → relay  {"hello":{"protocol":1}}                       first message
-relay → ext    {"hello":{"protocol":1,"relay":"0.2.1"}}
+relay → ext    {"hello":{"protocol":1,"relay":"0.2.2"}}
 relay → ext    {"session":"<id>","open":true}                 a session socket is connected
 relay → ext    {"session":"<id>","open":false}                that socket closed (session ended or crashed)
 relay → ext    {"session":"<id>","message":{...}}             from Pi

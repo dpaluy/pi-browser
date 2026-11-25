@@ -71,7 +71,7 @@ test("relay frames split and bundled messages, labels by socket, and closes on s
   child.stdin.write(hello.subarray(0, 2));
   child.stdin.write(hello.subarray(2, 10));
   child.stdin.write(hello.subarray(10));
-  assert.deepEqual((await out.next()).value, { hello: { protocol: 1, relay: "0.2.1" } });
+  assert.deepEqual((await out.next()).value, { hello: { protocol: 1, relay: "0.2.2" } });
   const announced = [(await out.next()).value, (await out.next()).value];
   assert.deepEqual(announced.sort((a, b) => a.session.localeCompare(b.session)), [{ session: "alpha", open: true }, { session: "beta", open: true }]);
   const a = await alpha, b = await beta;
@@ -213,7 +213,7 @@ test("install discovers profile dirs, writes an exclusive manifest and a runnabl
   const exited = once(child, "close");
   const out = frames(child.stdout);
   child.stdin.write(frame({ hello: { protocol: 1 } }));
-  assert.deepEqual((await out.next()).value, { hello: { protocol: 1, relay: "0.2.1" } });
+  assert.deepEqual((await out.next()).value, { hello: { protocol: 1, relay: "0.2.2" } });
   assert.deepEqual((await out.next()).value, { session: "launcher", open: true });
   await peer;
   child.stdin.end();

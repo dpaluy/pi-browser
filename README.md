@@ -41,7 +41,7 @@ Mentioning "my browser", "in Chrome", or "logged in", or giving a URL, also help
 | `/browser settings` | Turn site approval and JavaScript confirmation on or off. |
 | `/browser sites` | List and remove sites you've always allowed. |
 
-The agent works in its own tab group, titled **pi · <session name>** or, for a session you haven't named, **pi · <project folder> · <first 4 characters of the session ID>**, in the background, without taking focus. The toolbar icon turns orange while it acts; click the icon to turn Pi Browser off at any time.
+The agent works in its own tab group in the background, without taking focus. The title is **π · <session name>**, or **π · <project folder>** for an unnamed session (up to 10 characters of the folder name, no session ID). The toolbar icon turns orange while it acts; click the icon to turn Pi Browser off at any time.
 
 ### Actions
 

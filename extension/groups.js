@@ -123,7 +123,7 @@ export function touch(id, tabId) {
 
 async function retitle(record, ended = false) {
   const [tab] = await members(record);
-  if (tab) await chrome.tabGroups.update(record.group, { title: `pi · ${record.name}${ended ? ' (ended)' : ''}` });
+  if (tab) await chrome.tabGroups.update(record.group, { title: `π · ${record.name}${ended ? ' (ended)' : ''}` });
 }
 
 export function rename(id, name) {

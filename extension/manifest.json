@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Pi Browser",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Lets Pi coding agent sessions work in tabs of their own tab group.",
   "minimum_chrome_version": "125",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAulkTBCZl5Fq/J4eUcI+H0bL+j+b1ahwLK5jhp2D7anRzT96fjnq4yWTFfT8+QdL1nzyVqdlORcuW8r5PCej0EpIBAp/Ox27y5g5qhW2l0t9sUAuwG4qJNdN82VBiSRKuRHNS4GDbJrCCfD6wuXBJYA7t83ZYcfbxpJ6J2jzVt5aDd9w7dBONrR5nuj7Jhv8RIIG3LK4JhkA7ZjEvEnG53EkO35o4ilJfJeHP6QgWAqXD7RCIZ0Egmk6G50uhtofbNMS/Q5SjaaklwtaqvjE2dfIt7zO5RMsamBE3y056VRdTcZt7HRzfXPdK52tR9NlsGMwsAkmd+TZLytlouK88XQIDAQAB",
