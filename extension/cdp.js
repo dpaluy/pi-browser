@@ -1,7 +1,10 @@
+import { coversHost, webHost } from './allowed.js';
+import { checkPower, offError } from './power.js';
+
 const tabs = new Map();
 const blockedKey = 'debuggerCanceled';
 let blocked = chrome.storage.session.get(blockedKey).then(data => Boolean(data[blockedKey]));
-const canceledMessage = 'The debugger was canceled by the user. Click the Pi Browser toolbar icon to resume.';
+const canceledMessage = 'The debugger was canceled by the user. Turn Pi Browser off and on again with its toolbar icon to resume.';
 const commandTimeout = 10_000;
 
 export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -17,7 +20,9 @@ export function command(tabId, method, params = {}, timeout = commandTimeout, se
 }
 
 export async function checkDebugger() {
-  if (await blocked) throw new Error(canceledMessage);
+  const canceled = await blocked;
+  checkPower();
+  if (canceled) throw new Error(canceledMessage);
 }
 
 export function resumeDebugger() {
@@ -25,8 +30,8 @@ export function resumeDebugger() {
   return chrome.storage.session.remove(blockedKey);
 }
 
-function failTab(state, message) {
-  state.failure = new Error(message);
+function failTab(state, error) {
+  state.failure = error;
   for (const abort of state.aborts) abort(state.failure);
 }
 
@@ -37,15 +42,17 @@ chrome.debugger.onDetach.addListener(({ tabId }, reason) => {
   }
   const state = tabs.get(tabId);
   if (!state) return;
-  failTab(state, reason === 'canceled_by_user' ? canceledMessage : `Debugger detached from tab ${tabId}: ${reason}.`);
-  if (!state.detaching) tabs.delete(tabId);
+  if (!state.detaching) {
+    failTab(state, new Error(reason === 'canceled_by_user' ? canceledMessage : `Debugger detached from tab ${tabId}: ${reason}.`));
+    tabs.delete(tabId);
+  }
 });
 
-export async function detach(tabId) {
+export async function detach(tabId, error = new Error(`Tab ${tabId} is not in your group.`)) {
   const state = tabs.get(tabId);
   if (!state) return;
   if (state.detaching) return state.detaching;
-  failTab(state, `Tab ${tabId} is not in your group.`);
+  failTab(state, error);
   state.detaching = (async () => {
     try {
       await state.attached;
@@ -57,6 +64,10 @@ export async function detach(tabId) {
     }
   })();
   return state.detaching;
+}
+
+export function detachAll() {
+  return Promise.all([...tabs.keys()].map(id => detach(id, offError())));
 }
 
 export function detachSession(session) {
@@ -102,12 +113,8 @@ function rememberTree(state, tree, parentOrigin) {
 
 function dialogError(state) {
   const dialog = state.dialog;
-  let host;
-  try {
-    const url = new URL(dialog.url);
-    if (url.protocol === 'http:' || url.protocol === 'https:') host = url.hostname;
-  } catch {}
-  if (host && !state.allowed?.has(host)) {
+  const host = webHost(dialog.url);
+  if (host && !coversHost(state.allowed, host)) {
     return Object.assign(new Error(`Approval is required to use ${host}.`), {
       code: 'needs-approval', host, acted: true,
     });
@@ -151,9 +158,7 @@ function onNetworkEvent(state, method, p, target) {
     let origin;
     try { origin = new URL(p.documentURL).origin; } catch {}
     if (!origin) origin = p.frameId ? state.origins.get(p.frameId) : target?.tree ? frameOrigin(target.tree.frame) : undefined;
-    let host;
-    try { host = new URL(p.request.url).hostname; } catch {}
-    const request = { method: p.request.method, url: p.request.url, type: p.type ?? 'Other', status: 'pending', host, origin };
+    const request = { method: p.request.method, url: p.request.url, type: p.type ?? 'Other', status: 'pending', origin };
     state.inFlight.set(p.requestId, request);
     append(state.network, request);
   } else if (method === 'Network.responseReceived') {
@@ -232,6 +237,7 @@ async function attach(tab, session) {
     await detach(id);
     state = tabs.get(id);
   }
+  checkPower();
   if (!state) {
     state = {
       session, groupId: tab.groupId, refs: new Map(), listeners: new Set(), aborts: new Set(),
@@ -241,7 +247,11 @@ async function attach(tab, session) {
     };
     tabs.set(id, state);
     state.attached = withTimeout(chrome.debugger.attach({ tabId: id }, '1.3'), commandTimeout, 'Debugger attach timed out.');
-    state.ready = initialize(id, state).catch(async error => { await detach(id); throw error; });
+    state.ready = initialize(id, state).catch(async error => {
+      const failure = state.failure ?? error;
+      await detach(id);
+      throw failure;
+    });
   }
   await state.ready;
   return state;

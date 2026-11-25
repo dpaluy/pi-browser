@@ -71,7 +71,7 @@ test("relay frames split and bundled messages, labels by socket, and closes on s
   child.stdin.write(hello.subarray(0, 2));
   child.stdin.write(hello.subarray(2, 10));
   child.stdin.write(hello.subarray(10));
-  assert.deepEqual((await out.next()).value, { hello: { protocol: 1, relay: "0.1.0" } });
+  assert.deepEqual((await out.next()).value, { hello: { protocol: 1, relay: "0.2.0" } });
   const announced = [(await out.next()).value, (await out.next()).value];
   assert.deepEqual(announced.sort((a, b) => a.session.localeCompare(b.session)), [{ session: "alpha", open: true }, { session: "beta", open: true }]);
   const a = await alpha, b = await beta;
@@ -160,6 +160,27 @@ test("Pi socket rejects mismatched handshakes with actionable versions", config,
   await connection;
 });
 
+test("Pi status follows the extension being turned off and on", config, async t => {
+  const dir = await temp(t);
+  const server = await SessionServer.open(dir, "toggle", () => "Test");
+  t.after(() => server.close());
+  const peer = createConnection(join(dir, "toggle.sock"));
+  t.after(() => { peer.destroy(); });
+  const messages = lines(peer);
+  peer.write('{"hello":{"protocol":1,"extension":"0.1.0","browser":"Chrome/158","on":false}}\n');
+  await server.connect(1000);
+  assert.equal((await messages()).hello.session, "toggle");
+  assert.equal(server.status, "Connected to Chrome/158, but Pi Browser is turned off in the browser. Click its toolbar icon to turn it on.");
+  peer.write('{"state":{"on":true}}\n');
+  await waitFor(() => server.status === "Connected to Chrome/158 (extension 0.1.0).");
+  peer.write('{"state":{"on":false}}\n');
+  await waitFor(() => /turned off/.test(server.status));
+});
+
+async function waitFor(check: () => boolean) {
+  while (!check()) await new Promise(resolve => setTimeout(resolve, 10));
+}
+
 test("install discovers profile dirs, writes an exclusive manifest and a runnable quoted launcher", config, async t => {
   const home = await temp(t);
   const chrome = join(home, "Library", "Application Support", "Google", "Chrome");
@@ -192,7 +213,7 @@ test("install discovers profile dirs, writes an exclusive manifest and a runnabl
   const exited = once(child, "close");
   const out = frames(child.stdout);
   child.stdin.write(frame({ hello: { protocol: 1 } }));
-  assert.deepEqual((await out.next()).value, { hello: { protocol: 1, relay: "0.1.0" } });
+  assert.deepEqual((await out.next()).value, { hello: { protocol: 1, relay: "0.2.0" } });
   assert.deepEqual((await out.next()).value, { session: "launcher", open: true });
   await peer;
   child.stdin.end();

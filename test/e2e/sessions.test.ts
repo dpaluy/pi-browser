@@ -65,6 +65,29 @@ test("always approval persists to settings and applies to a new Pi session", asy
   assert.deepEqual(next.prompts, []);
 });
 
+test("always allowing a domain covers subdomains but not look-alike hosts", async t => {
+  const h = await setup(t);
+  const pi = await h.session();
+  const www = h.url("/controls.html", "www.controls.test");
+  const subdomain = h.url("/controls.html", "a.b.controls.test");
+  const lookAlike = h.url("/controls.html", "badcontrols.test");
+  tabId((await pi.call("navigate", { url: www }, ["Always allow"])).text, "Pi controls", www);
+  tabId((await pi.call("navigate", { url: subdomain })).text, "Pi controls", subdomain);
+  assert.equal((await pi.call("navigate", { url: lookAlike }, ["Deny"])).text, denied("badcontrols.test"));
+  assert.deepEqual(pi.prompts.map(p => p.title), [question("www.controls.test"), question("badcontrols.test")]);
+  assert(!h.requests.some(req => req.host === "badcontrols.test"));
+});
+
+test("without site approval, navigating to different hosts never prompts", async t => {
+  const h = await setup(t, { approveSites: false });
+  const pi = await h.session();
+  for (const host of ["controls.test", "a.controls.test", "private.test"]) {
+    const url = h.url("/controls.html", host);
+    tabId((await pi.call("navigate", { url })).text, "Pi controls", url);
+  }
+  assert.deepEqual(pi.prompts, []);
+});
+
 test("a redirect to a different host prompts again and does not leak the denied page", async t => {
   const h = await setup(t);
   const pi = await h.session();
@@ -131,9 +154,22 @@ test("a same-session socket replacement cannot receive an in-flight response", a
     const c = await open();
     const status = c.request("status", {}, [], 10_000);
     await h.page(url, "finishFixtureEval()");
-    assert.match((await status).text!, /^Pi Browser .* sessions$/);
+    assert.match((await status).text!, /^Pi Browser .* · \d+ sessions?$/);
   } finally {
     await b.close();
     await pending;
   }
+});
+
+test("/browser in a fresh session waits for the extension and reports it connected", async t => {
+  const h = await setup(t);
+  const pi = await h.session("Status check");
+  await pi.command("browser", "");
+  const status = pi.notifications.at(-1);
+  assert.equal(status?.level, "info");
+  const [connection, decision] = status!.message.split("\n");
+  assert.match(connection, /^Connected to .+ \(extension \d+\.\d+\.\d+\)\.$/);
+  assert.equal(decision, process.env.TYPESAFE_API_KEY
+    ? "Decision model: TypeSafe jev-latest"
+    : "Decision model: none (find and target are off)");
 });

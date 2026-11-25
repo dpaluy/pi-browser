@@ -1,6 +1,6 @@
 {
   "name": "@dpaluy/pi-browser",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Let Pi work in your signed-in Chrome or Brave, in tabs of its own, in the background.",
   "type": "module",
   "license": "MIT",
@@ -17,6 +17,7 @@
     "version": "node -e \"const fs=require('fs'),f='extension/manifest.json',m=JSON.parse(fs.readFileSync(f));m.version=process.env.npm_package_version;fs.writeFileSync(f,JSON.stringify(m,null,2)+'\\n')\"",
     "check": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
+    "check:decision": "node scripts/check-decision-model.ts",
     "e2e": "node --test --test-concurrency=1 --test-timeout=90000 test/e2e/*.test.ts"
   },
   "peerDependencies": {

@@ -61,7 +61,7 @@ export class SessionServer {
   private readonly events = new EventEmitter().setMaxListeners(0);
   private readonly pending = new Map<number, Pending>();
   private socket: Socket | undefined;
-  private hello: { extension: string; browser: string } | undefined;
+  private hello: { extension: string; browser: string; on: boolean } | undefined;
   private failure: Error | undefined;
   private closed = false;
   private sequence = 0;
@@ -96,7 +96,12 @@ export class SessionServer {
     }
   }
 
+  get connected(): boolean {
+    return Boolean(this.hello && this.socket?.writable);
+  }
+
   get status(): string {
+    if (this.hello?.on === false) return `Connected to ${this.hello.browser}, but Pi Browser is turned off in the browser. Click its toolbar icon to turn it on.`;
     if (this.hello) return `Connected to ${this.hello.browser} (extension ${this.hello.extension}).`;
     return this.failure?.message ?? "Pi Browser is not connected. Load the extension in chrome://extensions and click its toolbar icon.";
   }
@@ -135,7 +140,8 @@ export class SessionServer {
   }
 
   private receive(socket: Socket, message: {
-    hello?: { protocol?: unknown; extension?: string; browser?: string };
+    hello?: { protocol?: unknown; extension?: string; browser?: string; on?: unknown };
+    state?: { on?: unknown };
     id?: number; error?: BrowserFailure; result?: BrowserResult;
   }): boolean {
     if (!this.hello) {
@@ -150,9 +156,11 @@ export class SessionServer {
         return false;
       }
       this.failure = undefined;
-      this.hello = { extension: message.hello.extension, browser: message.hello.browser };
+      this.hello = { extension: message.hello.extension, browser: message.hello.browser, on: message.hello.on !== false };
       socket.write(wire({ hello: { protocol: PROTOCOL, session: this.session, name: this.name() } }));
       this.events.emit("change");
+    } else if (typeof message.state?.on === "boolean") {
+      this.hello.on = message.state.on;
     } else if (message.id !== undefined) {
       const pending = this.pending.get(message.id);
       if (pending?.socket === socket) {

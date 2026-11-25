@@ -9,6 +9,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { browserExtension } from "../../src/index.ts";
 import { EXTENSION_ID, installHost } from "../../src/install.ts";
+import type { BrowserSettings } from "../../src/settings.ts";
 import { extensionId, startBrowser } from "./harness.ts";
 
 type LifecycleEvent = SessionStartEvent | SessionShutdownEvent;
@@ -119,13 +120,14 @@ export function fakePi(name: string, cwd: string, signal?: AbortSignal) {
   };
 }
 
-export async function setup(t: TestContext, settings?: { confirmEval?: boolean; alwaysAllow?: string[] }) {
+export async function setup(t: TestContext, settings?: Partial<BrowserSettings>, prepareProfile?: (profileDir: string) => Promise<void>) {
   assert.equal(EXTENSION_ID, extensionId);
   const browser = await startBrowser({
     signal: t.signal,
     beforeLaunch: async ({ agentDir, profileDir, socketsDir }) => {
-      if (settings) await writeFile(join(agentDir, "browser", "settings.json"), JSON.stringify(settings));
+      await writeFile(join(agentDir, "browser", "settings.json"), JSON.stringify({ ...settings, approveSites: settings?.approveSites ?? true }));
       await installHost([profileDir], socketsDir);
+      await prepareProfile?.(profileDir);
     },
   });
   const sessions: ReturnType<typeof fakePi>[] = [];

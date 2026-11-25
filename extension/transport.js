@@ -1,3 +1,6 @@
+import { beginAction, setConnection, setOn } from './status.js';
+import { checkPower, flipPower, isOn, offError, powerReady } from './power.js';
+
 export const PROTOCOL = 1;
 export const version = chrome.runtime.getManifest().version;
 export const browser = navigator.userAgent.match(/(?:Chrome|Chromium)\/[\d.]+/)?.[0] ?? navigator.userAgent;
@@ -8,19 +11,11 @@ function mismatch(peer) {
   return `Pi Browser protocol mismatch: extension ${PROTOCOL}, peer ${peer}. Reload the extension in chrome://extensions and run /reload in Pi.`;
 }
 
-export function startTransport({ request, rename, end, resume }) {
+export function startTransport({ request, rename, end, resume, detach }) {
   let connection;
   let retry;
   let delay = 1000;
   const queues = new Map();
-
-  function title(message) {
-    void chrome.action.setTitle({ title: `Pi Browser: ${message}` }).catch(console.warn);
-  }
-
-  function readyTitle({ sessions }) {
-    title(sessions.size ? `${sessions.size} sessions` : 'connected');
-  }
 
   function enqueue(session, fn) {
     const next = (queues.get(session) ?? Promise.resolve()).then(fn).catch(console.warn);
@@ -34,7 +29,7 @@ export function startTransport({ request, rename, end, resume }) {
     clearTimeout(conn.handshake);
     for (const session of conn.sessions.keys()) enqueue(session, () => end(session));
     conn.sessions.clear();
-    title(message);
+    setConnection(null, message);
     retry = setTimeout(connect, delay);
     delay = Math.min(delay * 2, 30_000);
   }
@@ -55,21 +50,34 @@ export function startTransport({ request, rename, end, resume }) {
       peer.name = typeof message.hello.name === 'string' ? message.hello.name : session;
       enqueue(session, () => rename(session, peer.name));
     } else if (message.error?.message && message.id == null) {
-      title(message.error.message);
+      setConnection(conn.sessions.values(), message.error.message);
     } else if (peer.ready && Number.isSafeInteger(message.id) && typeof message.method === 'string') {
       const name = typeof message.name === 'string' ? message.name : peer.name;
       const { id, method, params = {}, allowed } = message;
-      enqueue(session, async () => {
+      const on = isOn();
+      if (!on && method !== 'status') {
+        const { code, message } = offError();
+        deliver(conn, session, { id, error: { code, message } }, peer);
+        return;
+      }
+      const respond = async () => {
         if (connection !== conn || conn.sessions.get(session) !== peer) return;
+        const finish = beginAction(peer);
         try {
-          await rename(session, name);
+          if (method !== 'status') checkPower();
+          if (isOn()) await rename(session, name);
+          if (method !== 'status') checkPower();
           const result = await request({ session, name, method, params, allowed, count: conn.sessions.size });
           deliver(conn, session, { id, result }, peer);
         } catch (error) {
           const { code, host, acted } = error;
           deliver(conn, session, { id, error: { message: error.message, code, host, acted } }, peer);
+        } finally {
+          finish();
         }
-      });
+      };
+      if (!on) void respond();
+      else enqueue(session, respond);
     }
   }
 
@@ -85,17 +93,17 @@ export function startTransport({ request, rename, end, resume }) {
       clearTimeout(conn.handshake);
       conn.ready = true;
       delay = 1000;
-      readyTitle(conn);
+      setConnection(conn.sessions.values());
       return;
     }
     const { session, open, message } = packet;
     if (typeof session !== 'string' || !session) return;
     if (open === true && !conn.sessions.has(session)) {
       conn.sessions.set(session, { ready: false });
-      readyTitle(conn);
-      deliver(conn, session, { hello: { protocol: PROTOCOL, extension: version, browser } });
+      setConnection(conn.sessions.values());
+      deliver(conn, session, { hello: { protocol: PROTOCOL, extension: version, browser, on: isOn() } });
     } else if (open === false && conn.sessions.delete(session)) {
-      readyTitle(conn);
+      setConnection(conn.sessions.values());
       enqueue(session, () => end(session));
     } else {
       sessionMessage(conn, session, message);
@@ -117,10 +125,30 @@ export function startTransport({ request, rename, end, resume }) {
     port.postMessage({ hello: { protocol: PROTOCOL } });
   }
 
-  chrome.runtime.onStartup.addListener(connect);
-  chrome.runtime.onInstalled.addListener(connect);
-  chrome.action.onClicked.addListener(() => { void resume().catch(console.warn); connect(); });
-  chrome.alarms.onAlarm.addListener(({ name }) => { if (name === alarm) connect(); });
+  const ready = powerReady.then(() => { setOn(isOn()); });
+  const wake = () => { void ready.then(connect).catch(console.warn); };
+  chrome.runtime.onStartup.addListener(wake);
+  chrome.runtime.onInstalled.addListener(wake);
+  chrome.alarms.onAlarm.addListener(({ name }) => { if (name === alarm) wake(); });
   void chrome.alarms.create(alarm, { periodInMinutes: 1 }).catch(console.warn);
-  connect();
+  wake();
+
+  let toggling = ready;
+  return function handleToolbarClick() {
+    toggling = toggling.then(async () => {
+      const on = await flipPower();
+      setOn(on);
+      if (connection) {
+        for (const session of connection.sessions.keys()) deliver(connection, session, { state: { on } });
+      }
+      if (on) {
+        const resumed = resume();
+        connect();
+        await resumed;
+      } else {
+        await detach();
+      }
+    }).catch(console.warn);
+    return toggling;
+  };
 }

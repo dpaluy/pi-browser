@@ -38,9 +38,13 @@ src/approvals.ts          host approvals: once, session, always, deny; retry loo
 src/settings.ts           <agentDir>/browser/settings.json, atomic writes
 src/install.ts            native host manifest + launcher for every detected browser
 src/view.ts               read output: offset paging, interactive filter, truncation note
-src/targets.ts            Jev element resolution and find output (uses src/jev.ts)
-src/jev.ts                TypeSafe Jev client (exists)
+src/targets.ts            element resolution and find output over a decision model
+src/locate.ts             chunking, questions, and ranking of snapshot lines (provider-independent)
+src/decision.ts           DecisionModel interface and provider selection from settings + env
+src/decision/typesafe.ts  TypeSafe Jev provider
+src/decision/openai.ts    OpenAI-compatible provider using token logprobs
 src/render.ts             TUI renderCall / renderResult
+scripts/check-decision-model.ts  live check of the configured decision model (npm run check:decision)
 test/*.test.ts            unit tests (node:test)
 test/e2e/*                Chrome for Testing end-to-end suite
 ```
@@ -60,16 +64,21 @@ closed.
 Messages the relay delivers to Pi come from the extension. Messages Pi writes go to the extension.
 
 ```
-ext → pi   {"hello":{"protocol":1,"extension":"0.1.0","browser":"Chrome/141.0…"}}
+ext → pi   {"hello":{"protocol":1,"extension":"0.2.0","browser":"Chrome/141.0…","on":true}}
+ext → pi   {"state":{"on":false}}                       sent to every connected session when the user toggles
 pi  → ext  {"hello":{"protocol":1,"session":"<id>","name":"<session name>"}}
 pi  → ext  {"id":7,"method":"click","params":{...},"allowed":["example.com"],"name":"<session name>"}
 ext → pi   {"id":7,"result":{...}}
 ext → pi   {"id":7,"error":{"message":"..."}}
 ext → pi   {"id":7,"error":{"message":"...","code":"needs-approval","host":"cdn.example.net","acted":false}}
+ext → pi   {"id":7,"error":{"message":"Pi Browser is turned off in the browser. Click its toolbar icon to turn it on.","code":"off"}}
 ```
 
-- `allowed` lists the hosts this session may act on for this one call: always-allowed, session-allowed, and
-  allowed-once grants made earlier in the same tool call.
+- `allowed` lists what this session may act on for this one call. Each entry is a host or domain and covers
+  itself and every subdomain (`example.com` covers `www.example.com` and `a.b.example.com`, not `badexample.com`);
+  `"*"` covers every `http:`/`https:` host. Pi sends `["*"]` unless the user turned on site approval. With site
+  approval on, the list holds always-allowed, session-allowed, and allowed-once grants made earlier in the same
+  tool call. The same matching applies everywhere the extension checks a host (pages, frames, dialogs, network).
 - `name` is sent with every request so a renamed session's group is retitled on its next action.
 - Pi times out a request after 60 s (`wait` after its own timeout + 5 s) with a clear error.
 
@@ -79,7 +88,7 @@ Chrome frames stdio messages as a 4-byte little-endian length plus UTF-8 JSON. M
 
 ```
 ext   → relay  {"hello":{"protocol":1}}                       first message
-relay → ext    {"hello":{"protocol":1,"relay":"0.1.0"}}
+relay → ext    {"hello":{"protocol":1,"relay":"0.2.0"}}
 relay → ext    {"session":"<id>","open":true}                 a session socket is connected
 relay → ext    {"session":"<id>","open":false}                that socket closed (session ended or crashed)
 relay → ext    {"session":"<id>","message":{...}}             from Pi
@@ -92,9 +101,16 @@ relay exits when stdin closes. It writes diagnostics only to stderr.
 
 ## Extension behavior
 
-- **Connection.** The service worker connects with `chrome.runtime.connectNative` on startup, on install, on the
-  toolbar icon click, and on a 1-minute `chrome.alarms` tick while disconnected (backoff 1 s → 30 s inside a
-  live worker). The action title shows `Pi Browser: connected`, `…: N sessions`, or the last error.
+- **Connection.** The service worker connects with `chrome.runtime.connectNative` on startup, on install, when
+  turned on, and on a 1-minute `chrome.alarms` tick while disconnected (backoff 1 s → 30 s inside a live worker).
+  The action title shows `Pi Browser: connected`, `…: 1 session` or `…: N sessions`, or the last error.
+- **On/off.** Clicking the toolbar icon turns Pi Browser off or on; the choice persists in
+  `chrome.storage.local` across browser restarts. Off: it stays connected to the relay so Pi can explain, but fails
+  every request except `status` with code `off`, detaches the debugger from every tab (the "started debugging"
+  bar goes away), keeps tab groups and tabs as they are, and sends `{"state":{"on":false}}` to each session. The
+  icon has its own off look (distinct from the grey "not connected" icon) and the title
+  `Pi Browser: off — click to turn on`. On: reconnects immediately if disconnected, clears a user-canceled
+  debugger refusal, sends `{"state":{"on":true}}`, and titles append ` — click to turn off`.
 - **Groups.** Each session owns at most one tab group, created on its first `navigate`. A tab belongs to a session
   only while it is in that session's group; a tab the user drags in joins it. Requests for any other tab fail with
   `Tab <id> is not in your group.` The session's current tab is the last tab it navigated or acted on; when that
@@ -102,7 +118,7 @@ relay exits when stdin closes. It writes diagnostics only to stderr.
   is retitled `(ended)`, its tabs stay, and the debugger detaches from them. A session that reconnects with the
   same id takes its group back.
 - **Approval.** Before acting, the extension takes the host of the tab's main frame and fails with
-  `needs-approval` (`acted:false`) if it is not in `allowed`. `navigate` checks the target URL first. After any
+  `needs-approval` (`acted:false`) if `allowed` does not cover it. `navigate` checks the target URL first. After any
   navigation (`navigate`, history, or a click that navigates during the action) it checks where the page ended; a
   new unapproved host fails with `needs-approval` and `acted:true`, returning nothing from the page. Input into a
   cross-site frame (point actions, a ref inside such a frame, typing where focus is in one) needs that frame's
@@ -111,8 +127,8 @@ relay exits when stdin closes. It writes diagnostics only to stderr.
   `Page`, `Network`, `DOM`, `Accessibility`, then `Emulation.setFocusEmulationEnabled {enabled:true}` so the tab
   takes input and renders screenshots while hidden, behind another tab, or in a minimized window. `Runtime` and
   `Log` are enabled only once the agent uses `console`, since some sites detect it. Detach when the tab leaves the
-  group or its session ends. When the user cancels the debugger infobar, refuse actions until the toolbar icon is
-  clicked.
+  group or its session ends. When the user cancels the debugger infobar, refuse actions until the user turns
+  Pi Browser off and on again with the toolbar icon.
 - **Dialogs.** A JavaScript dialog opening during an action fails the action at once:
   `The page opened a <type> dialog ("<message>"); answer it in the browser, then try again.` The dialog stays.
   A dialog from a page on an unapproved host fails with `needs-approval` (`acted:true`) and no message text.
@@ -181,13 +197,16 @@ heading "Welcome"
   `hasUI` in RPC mode); print/RPC modes and subagents never see it. Params an action does not take are dropped
   before sending, so models that fill every field work. Zero, empty string, and empty array mean "not given"
   for optional parameters; a fill field’s empty `value` still clears the field.
+- **Site approval.** Off by default (`approveSites: false` in `settings.json`): Pi sends `allowed: ["*"]` and never
+  asks about sites. `/browser settings` turns it on. With it on, approvals work as below.
 - **Approvals.** On `needs-approval` Pi asks `Let the agent use <host> in the browser?` with
   `Allow once`, `Allow for this session`, `Always allow`, `Deny`, then retries a request that has not acted
   with the grant (once grants last for this tool call only). If `acted:true`, it must not replay the request
   (for example a click could submit again, or `back` could move twice). After a grant it returns
   `The browser action already ran and reached <host>; it was not repeated. Read the page before continuing.`
   Deny fails: `The user did not allow the browser on <host>.` One call asks at most once per host.
-  Always-allowed hosts live in `settings.json` (`alwaysAllow`).
+  Always-allowed hosts live in `settings.json` (`alwaysAllow`). A grant is saved and sent as the host with a
+  leading `www.` removed, so approving `www.example.com` covers `example.com` and all its subdomains.
 - **Eval confirmation.** With `confirmEval` on, Pi shows the code and runs it only on `Run all <n> lines`. Code is
   capped at 20 lines and 1,500 characters, no two blank lines in a row, no invisible/control characters except
   newline and tab.
@@ -200,13 +219,53 @@ heading "Welcome"
 - **Read output.** `view(text, offset, interactive)` in `src/view.ts`; truncation to
   `DEFAULT_MAX_LINES`/`DEFAULT_MAX_BYTES` names the next offset. Offsets count raw snapshot lines from zero,
   even with interactive filtering; the next offset is immediately after the last displayed line.
-- **Jev.** With `TYPESAFE_API_KEY`, the schema adds `find` and `target` (on click, type, select, keys, scroll,
-  upload, and each fill field). Without it, neither appears.
+- **Decision model.** `find` and `target` (on click, type, select, keys, scroll, upload, and each fill field)
+  appear in the schema only when a decision model is configured. A decision model answers structured
+  questions about page text with probabilities, not prose. Two question types:
+  - `choice`: pick one of the given option ids; answer `probabilities: {id: p}` (may cover only some options;
+    values in [0, 1], sum ≤ 1).
+  - `noul`: a yes/no judgment; answer `noul: p` = probability of yes.
+  `src/locate.ts` asks, per snapshot chunk and query, one `choice` ("which line") and one `noul` ("is it here"),
+  plus an ambiguity `noul` for element queries, and resolves a target only when one element clearly wins
+  (`RESOLVE` thresholds). It never sees provider details.
+
+  ```ts
+  interface DecisionModel {
+    readonly label: string;   // e.g. "TypeSafe jev-latest", "qwen3-1.7b at http://127.0.0.1:8080/v1"
+    ask(state: Record<string, string>, questions: Record<string, Question>, signal?: AbortSignal): Promise<Record<string, Answer>>;
+  }
+  type Question = { type: "choice"; instructions: string; options: string[] } | { type: "noul"; instructions: string; yes: string; no: string };
+  type Answer = { probabilities?: Record<string, number>; noul?: number };
+  ```
+
+  Configuration, `decision` in `settings.json` (validated; unknown provider → clear error at load):
+  - absent: `typesafe` if `TYPESAFE_API_KEY` is set (0.1.0 behavior), otherwise none.
+  - `{"provider": "typesafe", "model"?: "jev-latest", "apiKeyEnv"?: "TYPESAFE_API_KEY"}`: one `/v1/systemone`
+    request per chunk carrying all its questions (`criteria` = options for choice, `{true, false}` for noul).
+  - `{"provider": "openai", "baseUrl": "http://127.0.0.1:8080/v1", "model": "…", "apiKeyEnv"?: "…"}`: any
+    OpenAI-compatible `/chat/completions` that returns `logprobs` (llama.cpp `llama-server`, vLLM, SGLang,
+    Ollama, OpenAI, …). The API key is read from the named environment variable, never stored in settings;
+    without `apiKeyEnv` no Authorization header is sent. One request per question, temperature 0,
+    `logprobs: true`, `top_logprobs: 20`, 4 in flight.
+    - noul: the prompt gives `state`, the question, and what yes/no mean, and asks for exactly `yes` or `no`
+      (`max_tokens: 1`). P(yes) = Σp(yes-like tokens) / (Σp(yes-like) + Σp(no-like)) over the first token's
+      top logprobs, matching case-insensitively after trimming whitespace.
+    - choice: options are relabeled `1…n` within the question; the model answers with a label only
+      (`max_tokens: 4`). The chosen option's probability is the product of the probabilities of the tokens
+      that spell its label (stopping at the first non-digit); other options are not scored. A single-chunk
+      element target therefore resolves only when that probability ≥ `RESOLVE.probability`.
+    - A response without logprobs, or whose answer is not a valid label / yes / no, fails the call with
+      `The decision model at <baseUrl> (<model>) did not return token probabilities…` or names what it
+      returned, so the user can pick a model or server that does. Reasoning output is not parsed: use a model
+      without thinking or with thinking turned off.
+- `/browser` reports the decision model's `label`, or `Decision model: none (find and target are off)`.
 - **Images.** Screenshots and zooms are returned as image content and saved under a private `mkdtemp` folder
   `pi-browser-*`; the text gives the path and size.
-- **`/browser`.** Installs/refreshes the native host for every detected browser, then shows the extension folder,
-  the extension ID, and connection status. `/browser settings` toggles eval confirmation. `/browser sites` lists
-  always-allowed hosts and removes one the user picks.
+- **`/browser`.** Installs/refreshes the native host for every detected browser, then shows the connection status
+  (including `Pi Browser is turned off in the browser…` when off) and, while not connected, the extension folder.
+  `/browser settings` toggles site approval and eval confirmation. `/browser sites` lists always-allowed hosts and
+  removes one the user picks. `/browser <task>` with any other text sends `<task>` as a user message with an
+  instruction to do it with the `browser` tool.
 - **Install.** For each existing browser data folder (macOS `~/Library/Application Support/<…>`, Linux
   `~/.config/<…>`: Google Chrome, Chrome Beta/Dev/Canary, Chromium, Brave, Microsoft Edge, Vivaldi), write
   `NativeMessagingHosts/dev.majesticlabs.pi_browser.json` (`allowed_origins` = our extension only) and a launcher
@@ -220,7 +279,7 @@ heading "Welcome"
 export interface BrowserOptions {
   agentDir?: string;          // default getAgentDir(); settings.json and sockets/ live in <agentDir>/browser
   browserDirs?: string[];     // default detectBrowserDirs(); where the host is installed on first use
-  typesafeKey?: string;       // default process.env.TYPESAFE_API_KEY
+  env?: Record<string, string | undefined>; // default process.env; source of TYPESAFE_API_KEY and apiKeyEnv values
   connectTimeoutMs?: number;  // how long a call waits for the extension to connect; default 15000
   requestTimeoutMs?: number;  // default 60000
 }

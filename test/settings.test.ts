@@ -53,3 +53,26 @@ test("a lock left by a crashed process is taken over; a fresh one is waited for"
   await pending;
   assert.deepEqual(JSON.parse(await readFile(join(dir, "settings.json"), "utf8")).alwaysAllow, ["stale.test", "fresh.test"]);
 });
+
+test("settings validate the decision provider and preserve it during updates", async t => {
+  const dir = await folder(t);
+  const store = settingsStore(dir);
+  const path = join(dir, "settings.json");
+  for (const [decision, error] of [
+    [null, /decision must be an object/],
+    [{ provider: "unknown" }, /decision has unknown provider "unknown"/],
+    [{ provider: "typesafe", model: 42 }, /decision model must be a non-empty string/],
+    [{ provider: "typesafe", apiKeyEnv: " " }, /decision apiKeyEnv must name an environment variable/],
+    [{ provider: "typesafe", apiKey: "secret" }, /decision has unknown field apiKey/],
+    [{ provider: "openai", baseUrl: "http://127.0.0.1/v1" }, /decision model must be a non-empty string/],
+    [{ provider: "openai", model: "local", baseUrl: "ftp://example.test" }, /decision baseUrl must be an HTTP\(S\) base URL/],
+    [{ provider: "openai", model: "local", baseUrl: "https://user:secret@example.test" }, /decision baseUrl must be an HTTP\(S\) base URL/],
+  ] as const) {
+    await writeFile(path, JSON.stringify({ decision }));
+    await assert.rejects(store.load(), error);
+  }
+  const decision = { provider: "openai", model: "local", baseUrl: "http://127.0.0.1:8080/v1", apiKeyEnv: "LOCAL_KEY" };
+  await writeFile(path, JSON.stringify({ decision }));
+  await store.update(s => { s.confirmEval = false; });
+  assert.deepEqual(await store.load(), { approveSites: false, alwaysAllow: [], confirmEval: false, decision });
+});

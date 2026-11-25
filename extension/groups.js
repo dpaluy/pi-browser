@@ -1,3 +1,5 @@
+import { checkPower } from './power.js';
+
 const key = 'sessions';
 let registry = chrome.storage.session.get(key).then(data => data[key] ?? {});
 
@@ -150,6 +152,7 @@ export function createTab(id, name) {
     let record = entry(sessions, id);
     const [existing] = await members(record);
     const windowId = existing?.windowId ?? (await chrome.windows.getLastFocused({ windowTypes: ['normal'] })).id;
+    checkPower();
     const tab = await chrome.tabs.create({ windowId, active: false, url: 'about:blank' });
     try {
       const group = await chrome.tabs.group({ tabIds: [tab.id], ...(existing ? { groupId: record.group } : {}) });

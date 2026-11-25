@@ -3,7 +3,8 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, defineTool, formatSize, truncateHead, type AgentToolResult, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
-import { approvalCall, pageHost } from "./approvals.ts";
+import { approvalCall, covers, pageHost } from "./approvals.ts";
+import type { DecisionModel } from "./decision.ts";
 import { renderCall, renderResult, terminalText } from "./render.ts";
 import type { SessionServer } from "./server.ts";
 import type { SettingsStore } from "./settings.ts";
@@ -23,10 +24,10 @@ const actions = Object.keys(actionFields) as Action[];
 const optional = Type.Optional;
 const coordinates = (length: number, description: string) => Type.Array(Type.Number(), { minItems: length, maxItems: length, description });
 
-export function browserSchema(jev: boolean) {
+export function browserSchema(hasDecision: boolean) {
   const target = optional(Type.String({ description: "Describe an element by its role, name, or purpose instead of using ref." }));
   const schema = Type.Object({
-    action: Type.Enum(actions.filter(action => jev || action !== "find"), { type: "string" }),
+    action: Type.Enum(actions.filter(action => hasDecision || action !== "find"), { type: "string" }),
     tabId: optional(Type.Integer({ description: "Defaults to this session’s current tab." })),
     url: optional(Type.String()), newTab: optional(Type.Boolean()),
     offset: optional(Type.Integer({ description: "Zero-based snapshot line offset for read." })),
@@ -44,7 +45,7 @@ export function browserSchema(jev: boolean) {
     code: optional(Type.String()),
     query: optional(Type.String({ description: "Page content to find semantically." })),
   }, { additionalProperties: false });
-  if (!jev) {
+  if (!hasDecision) {
     const { target, query, fields, ...common } = schema.properties;
     const refFields = optional(Type.Array(Type.Omit(fields.items, ["target"])));
     // This schema accepts a subset of Input; the extra inputs are optional.
@@ -56,22 +57,22 @@ export function browserSchema(jev: boolean) {
 type Input = Static<ReturnType<typeof browserSchema>>;
 const given = (value: unknown) => value !== undefined && value !== 0 && value !== "" && (!Array.isArray(value) || value.length > 0);
 
-export function normalizeParams(input: unknown, jev: boolean): Input {
+export function normalizeParams(input: unknown, hasDecision: boolean): Input {
   const args = input as Input | null;
   const action = args?.action;
-  if (!args || typeof action !== "string" || !Object.hasOwn(actionFields, action) || (action === "find" && !jev)) {
+  if (!args || typeof action !== "string" || !Object.hasOwn(actionFields, action) || (action === "find" && !hasDecision)) {
     throw new Error("Choose a valid browser action.");
   }
   const result: Record<string, unknown> = { action };
   for (const key of ["tabId", ...actionFields[action as Action]] as const) {
-    if (key === "target" && (!jev || given(args.ref))) continue;
+    if (key === "target" && (!hasDecision || given(args.ref))) continue;
     const value = args[key];
     if (!given(value)) continue;
     if (key === "fields" && Array.isArray(value)) {
       result.fields = value.map(field => {
         if (!field || typeof field !== "object") return field;
         if (given(field.ref)) return { ref: field.ref, value: field.value };
-        if (jev && given(field.target)) return { target: field.target, value: field.value };
+        if (hasDecision && given(field.target)) return { target: field.target, value: field.value };
         return { value: field.value };
       });
     } else {
@@ -133,7 +134,7 @@ function validate({ action, ...params }: Input) {
 
 interface BrowserSession { server: SessionServer; hosts: Set<string> }
 interface ToolOptions {
-  key?: string;
+  decision?: DecisionModel;
   requestTimeoutMs?: number;
   connectTimeoutMs: number;
   store: SettingsStore;
@@ -141,21 +142,24 @@ interface ToolOptions {
 }
 
 export function browserTool(options: ToolOptions) {
-  const jev = Boolean(options.key);
+  const hasDecision = Boolean(options.decision);
   return defineTool({
     name: "browser",
     label: "Browser",
-    description: `Use the user's Chrome or Brave in this session’s tab group, without taking focus. Navigate to open the first tab; read for the accessibility snapshot and [refs], or screenshot for pixel coordinates (zoom uses [x, y, width, height]). Only HTTP(S) hosts approved by the user are available. Use read offset to continue after ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}, or interactive to show only refs.${jev ? " Use find with query to look for page content, or target instead of a ref to describe an element." : ""}`,
+    description: `Use the user's Chrome or Brave in this session’s tab group, without taking focus. Navigate to open the first tab; read for the accessibility snapshot and [refs], or screenshot for pixel coordinates (zoom uses [x, y, width, height]). Works on HTTP(S) pages; if the user turned on site approval, Pi asks them before the first action on a new site. Use read offset to continue after ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}, or interactive to show only refs.${hasDecision ? " Use find with query to look for page content, or target instead of a ref to describe an element." : ""}`,
     promptSnippet: "Browse in the current session’s Chrome or Brave tab group.",
-    parameters: browserSchema(jev),
-    prepareArguments: args => normalizeParams(args, jev),
+    promptGuidelines: [
+      "Use browser when the user asks to use their browser or to visit, open, or act on a website, and for pages that need their signed-in session or JavaScript; prefer it over fetching tools in those cases.",
+    ],
+    parameters: browserSchema(hasDecision),
+    prepareArguments: args => normalizeParams(args, hasDecision),
     executionMode: "sequential",
     renderCall,
     renderResult,
     async execute(_id, input, signal, _onUpdate, ctx): Promise<AgentToolResult<undefined>> {
       if (!ctx.hasUI || ctx.mode !== "tui") throw new Error("The browser tool requires an interactive Pi session.");
       signal?.throwIfAborted();
-      const cleaned = normalizeParams(input, jev);
+      const cleaned = normalizeParams(input, hasDecision);
       validate(cleaned);
       const { action, offset, interactive, query, ...params } = cleaned;
       const settings = await options.store.load();
@@ -172,7 +176,7 @@ export function browserTool(options: ToolOptions) {
       if (action === "upload") params.paths = await uploadPaths(params.paths!, ctx.cwd);
       const { server, hosts } = await options.start(ctx);
       await server.connect(options.connectTimeoutMs, signal);
-      const approval = approvalCall(options.store, hosts, ctx.ui, settings.alwaysAllow, signal);
+      const approval = approvalCall(options.store, hosts, ctx.ui, settings.alwaysAllow, signal, settings.approveSites);
       const request = (method: string, data: object, allowed: string[]) => server.request(method, data, allowed,
         options.requestTimeoutMs ?? (method === "wait" ? (params.timeout ?? 10_000) + 5_000 : 60_000), signal);
       const current = params.tabId === undefined ? {} : { tabId: params.tabId };
@@ -181,15 +185,15 @@ export function browserTool(options: ToolOptions) {
 
       if (action === "tabs") {
         const result = await tabs(current);
-        const allowed = new Set(approval.allowed());
+        const allowed = approval.allowed();
         const listing = (result.tabs ?? []).map(tab => {
           const host = pageHost(tab.url);
-          if (!host || !allowed.has(host)) return `Tab ${tab.id}: ${host ?? "(no web host)"}`;
+          if (!host || !covers(allowed, host)) return `Tab ${tab.id}: ${host ?? "(no web host)"}`;
           return `Tab ${tab.id}: ${tab.title} <${tab.url}>${tab.current ? " (current)" : ""}`;
         });
         return textResult([...listing, `${result.others ?? 0} other tabs are not in your group.`].join("\n"));
       }
-      if (action === "find") return textResult(await find((await read()).text ?? "", query!, options.key!, signal));
+      if (action === "find") return textResult(await find((await read()).text ?? "", query!, options.decision!, signal));
 
       let upload: Parameters<typeof approval.run>[1];
       if (action === "upload") {
@@ -218,7 +222,7 @@ export function browserTool(options: ToolOptions) {
         const text = snapshot.text ?? "";
         const snapshotTab = /^Tab (\d+):/.exec(text);
         if (params.tabId === undefined && snapshotTab) params.tabId = Number(snapshotTab[1]);
-        const hits = await matchTargets(text, targetFields.map(field => field.target!), options.key!, signal);
+        const hits = await matchTargets(text, targetFields.map(field => field.target!), options.decision!, signal);
         hits.forEach(({ ref, note }, i) => {
           targetFields[i].ref = ref;
           delete targetFields[i].target;

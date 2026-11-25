@@ -1,23 +1,30 @@
 import assert from "node:assert/strict";
-import { createAgentSession, DefaultResourceLoader, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, SessionManager, SettingsManager, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createAgentSession, DefaultResourceLoader, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, SessionManager, SettingsManager, type ExtensionFactory, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createConnection } from "node:net";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
-import { browserExtension } from "../src/index.ts";
+import { covers } from "../src/approvals.ts";
+import { browserExtension, type BrowserOptions } from "../src/index.ts";
 import { formatFind, resolveTarget } from "../src/targets.ts";
 import type { browserSchema } from "../src/tool.ts";
 import { view } from "../src/view.ts";
 
-async function fixture(t: TestContext) {
+// Site approval is off by default; tests that exercise approval prompts turn it on.
+async function fixture(t: TestContext, approveSites = true) {
   const root = await mkdtemp("/tmp/pibr-pi-");
   t.after(() => rm(root, { recursive: true, force: true }));
+  if (approveSites) {
+    await mkdir(join(root, "browser"), { recursive: true });
+    await writeFile(join(root, "browser", "settings.json"), JSON.stringify({ approveSites: true }));
+  }
   return root;
 }
 
-async function pi(t: TestContext, root: string, options: { mode?: "tui" | "rpc" | "print" | "json"; loadFromDisk?: boolean; key?: string } = {}) {
+async function pi(t: TestContext, root: string, options: { mode?: "tui" | "rpc" | "print" | "json"; loadFromDisk?: boolean; env?: BrowserOptions["env"]; also?: ExtensionFactory[] } = {}) {
   const prompts: { question: string; options?: string[]; message?: string }[] = [];
   const answers: (string | boolean | undefined)[] = [];
   const notifications: string[] = [];
@@ -41,7 +48,7 @@ async function pi(t: TestContext, root: string, options: { mode?: "tui" | "rpc" 
   const settingsManager = SettingsManager.inMemory();
   const optionsForLoader = options.loadFromDisk
     ? { additionalExtensionPaths: [fileURLToPath(new URL("../src/index.ts", import.meta.url))] }
-    : { extensionFactories: [browserExtension({ agentDir: root, browserDirs: [], typesafeKey: options.key ?? "", connectTimeoutMs: 1000 })] };
+    : { extensionFactories: [browserExtension({ agentDir: root, browserDirs: [], env: options.env ?? {}, connectTimeoutMs: 1000 }), ...options.also ?? []] };
   const resourceLoader = new DefaultResourceLoader({
     cwd: root, agentDir: root, settingsManager, ...optionsForLoader,
     noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
@@ -70,6 +77,24 @@ async function pi(t: TestContext, root: string, options: { mode?: "tui" | "rpc" 
   return { session, pathname, prompts, answers, notifications, call };
 }
 
+async function decisionPeer<Body>(t: TestContext, respond: (body: Body, response: ServerResponse) => void) {
+  const seen: { path?: string; method?: string; headers: IncomingMessage["headers"]; body: Body }[] = [];
+  const server = createServer(async (request, response) => {
+    request.setEncoding("utf8");
+    let raw = "";
+    for await (const part of request) raw += part;
+    const body = JSON.parse(raw);
+    seen.push({ path: request.url, method: request.method, headers: request.headers, body });
+    response.setHeader("Content-Type", "application/json");
+    respond(body, response);
+  });
+  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  t.after(() => new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections(); }));
+  const address = server.address();
+  assert(address && typeof address !== "string");
+  return { url: `http://127.0.0.1:${address.port}`, seen };
+}
+
 interface Request {
   id: number;
   method: string;
@@ -81,7 +106,7 @@ interface Request {
 type Response = { result: object } | { error: object };
 async function browserPeer(t: TestContext, app: Awaited<ReturnType<typeof pi>>, dispatch: (request: Request) => Response) {
   await app.session.prompt("/browser"); // Install/start through the actual Pi slash command dispatcher.
-  assert.match(app.notifications.at(-1) ?? "", /Extension folder: .*\nExtension ID: odhaeafpfooplfbcefglfcmlpbedofdo/);
+  assert.match(app.notifications.at(-1) ?? "", /^Pi Browser is not connected\. .*\nExtension folder: \/.+\/extension$/m);
   const socket = createConnection(app.pathname);
   const seen: Request[] = [];
   const reader = createInterface({ input: socket });
@@ -118,7 +143,7 @@ test("Pi 1.6 loads the extension file and registers browser only in TUI", async 
     assert.equal(app.session.getActiveToolNames().includes("browser"), mode === "tui", mode);
   }
   for (const key of ["", "test-key"]) {
-    const app = await pi(t, root, { key });
+    const app = await pi(t, root, { env: { TYPESAFE_API_KEY: key } });
     const definition = app.session.getToolDefinition("browser");
     assert(definition);
     const props = (definition.parameters as ReturnType<typeof browserSchema>).properties;
@@ -136,6 +161,7 @@ test("tool prompts at most once per host per call; once, session, always, and de
   let acted = false;
   let host = helloHost;
   const requests = await browserPeer(t, app, ({ allowed }) => force || !allowed.includes(host) ? error(host, acted) : reply());
+  assert.match(app.notifications.at(-1) ?? "", /Decision model: none \(find and target are off\)$/);
   app.answers.push("Allow once");
   assert.equal(await app.call("read"), "ok");
   assert.deepEqual(requests.map(req => req.allowed), [[], [host]]);
@@ -173,7 +199,7 @@ test("tool prompts at most once per host per call; once, session, always, and de
 
 test("tool drops unused/default params and validates eval through the real request boundary", { timeout: 8000 }, async t => {
   const root = await fixture(t);
-  const app = await pi(t, root, { key: "test-key" });
+  const app = await pi(t, root, { env: { TYPESAFE_API_KEY: "test-key" } });
   const requests = await browserPeer(t, app, ({ method }) => reply(method));
   assert.equal(await app.call("read", { tabId: 0, code: "ignored", offset: 0, url: "ignored", paths: [], text: "" }), "read");
   assert.deepEqual(requests.at(-1)?.params, {});
@@ -201,7 +227,7 @@ test("tool drops unused/default params and validates eval through the real reque
   assert.equal(await app.call("eval", { code }), "eval");
   assert.deepEqual(requests.at(-1)?.params, { code });
   assert.equal(app.prompts.at(-1)?.question, `Run this browser code?\n${code}`);
-  app.answers.push("Turn off eval confirmation");
+  app.answers.push("Run page JavaScript without asking");
   await app.session.prompt("/browser settings");
   const limit = "x;\n".repeat(19) + "x".repeat(1500 - 57);
   assert.equal(await app.call("eval", { code: limit }), "eval");
@@ -236,6 +262,63 @@ test("upload checks local files before asking and pins consent to the actual des
   assert.match(app.prompts.at(-1)?.question ?? "", /to a page on frame\.test\?/);
 });
 
+test("by default the tool works on any site without asking; covered grants include subdomains", { timeout: 8000 }, async t => {
+  const root = await fixture(t, false);
+  const app = await pi(t, root);
+  const requests = await browserPeer(t, app, request => request.method === "tabs"
+    ? { result: { tabs: [{ id: 4, current: true, title: "Shop", url: "https://shop.test/cart" }], others: 2 } }
+    : covers(request.allowed, "any.test") ? reply("done") : error("any.test"));
+  assert.equal(await app.call("navigate", { url: "https://any.test/" }), "done");
+  assert.equal(await app.call("tabs"), "Tab 4: Shop <https://shop.test/cart> (current)\n2 other tabs are not in your group.");
+  assert.deepEqual(requests.map(request => request.allowed), [["*"], ["*"]]);
+  assert.equal(app.prompts.length, 0);
+
+  // Uploads still confirm the files for each destination and send only confirmed ones.
+  const file = join(root, "memo.txt");
+  await writeFile(file, "fixture");
+  app.answers.push(true, false);
+  await assert.rejects(app.call("upload", { ref: 1, paths: [file] }), { message: "The user did not allow the browser upload on any.test." });
+  assert.deepEqual(requests.at(-1)?.allowed, ["shop.test"]);
+  assert.deepEqual(app.prompts.map(prompt => prompt.question.replace(/".*"/, "<file>")),
+    ["Let the agent attach <file> to a page on shop.test?", "Let the agent attach <file> to a page on any.test?"]);
+  app.prompts.length = 0;
+
+  // Turning site approval on makes Pi ask; a grant saved for www.<site> covers the site and its subdomains only.
+  app.answers.push("Ask before the agent uses a new site");
+  await app.session.prompt("/browser settings");
+  assert.equal(JSON.parse(await readFile(join(root, "browser", "settings.json"), "utf8")).approveSites, true);
+  let host = "www.store.test";
+  const next = await pi(t, root);
+  const nextRequests = await browserPeer(t, next, request => covers(request.allowed, host) ? reply("ok") : error(host));
+  next.answers.push("Always allow");
+  assert.equal(await next.call("read"), "ok");
+  assert.deepEqual(JSON.parse(await readFile(join(root, "browser", "settings.json"), "utf8")).alwaysAllow, ["store.test"]);
+  host = "api.store.test";
+  assert.equal(await next.call("read"), "ok");
+  assert.equal(next.prompts.length, 1);
+  host = "badstore.test";
+  next.answers.push("Deny");
+  await assert.rejects(next.call("read"), { message: "The user did not allow the browser on badstore.test." });
+  assert.deepEqual(nextRequests.at(-1)?.allowed, ["store.test"]);
+});
+
+test("/browser <task> asks the agent to do the task with the browser tool", { timeout: 8000 }, async t => {
+  const root = await fixture(t, false);
+  const sent: { text: string; source: string }[] = [];
+  const app = await pi(t, root, { also: [pi => {
+    pi.on("input", event => {
+      sent.push({ text: event.text, source: event.source });
+      return { action: "handled" };
+    });
+  }] });
+  await app.session.prompt("/browser visit majesticlabs.dev and explain what this company does");
+  assert.deepEqual(sent, [{
+    text: "Use the browser tool, which works in my own Chrome or Brave, for this: visit majesticlabs.dev and explain what this company does",
+    source: "extension",
+  }]);
+  assert.deepEqual(app.notifications, []);
+});
+
 test("view resumes after the last shown raw line in full and interactive pages", () => {
   const header = "Tab 123: Page title <https://example.com>";
   const snapshot = [header, ...Array.from({ length: DEFAULT_MAX_LINES + 2 }, (_, i) => `line ${i + 1}`)].join("\n");
@@ -268,27 +351,116 @@ test("Jev output names match strength and candidates, resolving only clear ref l
 
 test("fill resolves its targets together and sends nothing if any target is ambiguous", { timeout: 8000 }, async t => {
   const root = await fixture(t);
-  const app = await pi(t, root, { key: "test-key" });
+  const app = await pi(t, root, { env: { TYPESAFE_API_KEY: "test-key" } });
   const snapshot = 'Tab 42: Sample <https://example.test/form>\n[11] textbox "Email"\n[12] textbox "Name"';
   const requests = await browserPeer(t, app, ({ method }) => method === "read" ? reply(snapshot) : reply("Filled"));
-  const jevRequests: Record<string, unknown>[] = [];
+  assert.match(app.notifications.at(-1) ?? "", /Decision model: TypeSafe jev-latest/);
+  let retry = true;
+  const upstream = "https://api.typesafe.ai";
   let ambiguous = false;
-  t.mock.method(globalThis, "fetch", async (url: string, options: RequestInit) => {
-    assert.equal(url, "https://api.typesafe.ai/v1/systemone");
-    const body = JSON.parse(String(options.body));
-    jevRequests.push(body.questions);
-    return Response.json({ answers: {
+  const http = await decisionPeer<{ model: string; state: Record<string, string>; questions: Record<string, unknown> }>(t, (body, response) => {
+    if (retry) {
+      retry = false;
+      response.writeHead(429, { "Retry-After": "1" }).end();
+      return;
+    }
+    response.end(JSON.stringify({ answers: {
       exists0: { noul: 0.95 }, ambiguous0: { noul: 0 }, where0: { probabilities: { L1: 1 } },
-      exists1: { noul: 0.9 }, ambiguous1: { noul: ambiguous ? 0.8 : 0 }, where1: { probabilities: { L2: 1 } },
-    } });
+      ...(Object.hasOwn(body.questions, "where1") && {
+        exists1: { noul: 0.9 }, ambiguous1: { noul: ambiguous ? 0.8 : 0 }, where1: { probabilities: { L2: 1 } },
+      }),
+    } }));
+  });
+  // Route the hard-coded production endpoint to the local server, retaining real fetch and HTTP.
+  const fetchHttp = globalThis.fetch;
+  const urls: string[] = [];
+  t.mock.method(globalThis, "fetch", (url: string, init: RequestInit) => {
+    urls.push(url);
+    return fetchHttp(url.replace(upstream, http.url), init);
   });
   const fields = [{ target: "email", value: "person@example.test" }, { target: "name", value: "A Person" }];
   assert.equal(await app.call("fill", { fields }), 'Matched "email" → [11] textbox "Email" (95%)\nMatched "name" → [12] textbox "Name" (90%)\nFilled');
   assert.deepEqual(requests.map(req => req.method), ["read", "fill"]);
   assert.deepEqual(requests[1].params, { tabId: 42, fields: [{ ref: 11, value: fields[0].value }, { ref: 12, value: fields[1].value }] });
-  assert.equal(jevRequests.length, 1);
-  assert.deepEqual(Object.keys(jevRequests[0]), ["where0", "exists0", "ambiguous0", "where1", "exists1", "ambiguous1"]);
+  assert.deepEqual(urls, Array(2).fill(`${upstream}/v1/systemone`));
+  const [first, second] = http.seen;
+  assert.deepEqual(first.body, second.body);
+  assert.equal(first.method, "POST");
+  assert.equal(first.path, "/v1/systemone");
+  assert.equal(first.headers.authorization, "Bearer test-key");
+  assert.equal(first.headers["content-type"], "application/json");
+  assert.equal(first.body.model, "jev-latest");
+  assert.deepEqual(first.body.state, { tab: snapshot.split("\n")[0], page: 'L1| [11] textbox "Email"\nL2| [12] textbox "Name"' });
+  assert.deepEqual(Object.keys(first.body.questions), ["where0", "exists0", "ambiguous0", "where1", "exists1", "ambiguous1"]);
+  assert.deepEqual(first.body.questions.where0, {
+    type: "choice",
+    instructions: '`page` is a web page\'s accessibility tree, one line per id; lines with a [number] are elements a user can act on. Which element should be used for: "email"?',
+    criteria: { L1: null, L2: null },
+  });
+  const exists = first.body.questions.exists0 as { type: string; criteria: unknown };
+  assert.equal(exists.type, "noul");
+  assert.deepEqual(exists.criteria, {
+    true: "A line with a [number] is clearly the element described", false: "No line with a [number] is the element described",
+  });
   ambiguous = true;
   await assert.rejects(app.call("fill", { fields }), /"name" fits more than one element \(80% likely\), so nothing was done/);
   assert.deepEqual(requests.map(req => req.method), ["read", "fill", "read"]);
+  assert.equal(await app.call("find", { query: "email" }), '"email": found on this page (match 95%).\nline 2 (95%): [11] textbox "Email"');
+  assert.deepEqual(Object.keys(http.seen[3].body.questions), ["where0", "exists0"]);
+});
+
+test("OpenAI is selected from disk and scores target and find over chat completions", { timeout: 8000 }, async t => {
+  const root = await fixture(t);
+  const snapshot = ['Tab 42: Sample <https://example.test/form>', ...Array.from({ length: 11 }, (_, i) => `[${i + 1}] button "Item ${i + 1}"`), '[42] button "Save"'].join("\n");
+  const token = (token: string, p: number) => ({ token, logprob: Math.log(p) });
+  let failure: "missing" | "invalid" | undefined;
+  const http = await decisionPeer<{ messages: { role: string; content: string }[]; max_tokens: number }>(t, (body, response) => {
+    const prompt = body.messages[0].content;
+    const isChoice = body.max_tokens === 4;
+    const ambiguous = prompt.includes('reasonably mean two or more');
+    const answer = isChoice ? failure === "invalid" ? "Save" : " 12" : ambiguous ? " nO" : " YES";
+    const content = isChoice ? failure === "invalid" ? [token("Save", 0.9)]
+      : [token(" 1", 0.92), token("2", 0.81), token("\n", 0.3)]
+      : [{ ...token(answer, 0.2), top_logprobs: ambiguous
+        ? [token(" nO", 0.2), token("no\n", 0.25), token("Yes", 0.05)]
+        : [token(" YES", 0.2), token("yes\n", 0.2), token("No", 0.05), token(" nO", 0.05), token("Other", 0.5)] }];
+    response.end(JSON.stringify({ choices: [{ message: { content: answer }, ...(failure === "missing" && isChoice ? {} : { logprobs: { content } }) }] }));
+  });
+  const baseUrl = `${http.url}/v1`;
+  await writeFile(join(root, "browser", "settings.json"), JSON.stringify({ decision: { provider: "openai", baseUrl, model: "local-test" } }));
+  const app = await pi(t, root, { env: { TYPESAFE_API_KEY: "must-not-be-used" } });
+  const definition = app.session.getToolDefinition("browser");
+  assert(definition);
+  const props = (definition.parameters as ReturnType<typeof browserSchema>).properties;
+  assert(props.action.enum.includes("find"));
+  assert(Object.hasOwn(props, "target"));
+  assert(Object.hasOwn(props.fields.items.properties, "target"));
+  const requests = await browserPeer(t, app, ({ method }) => method === "read" ? reply(snapshot) : reply("Clicked"));
+  assert.match(app.notifications.at(-1) ?? "", /Decision model: local-test at http:\/\/127\.0\.0\.1:\d+\/v1/);
+  assert.equal(await app.call("click", { target: "save button" }), 'Matched "save button" → [42] button "Save" (60%)\nClicked');
+  assert.deepEqual(requests.map(req => [req.method, req.params]), [["read", {}], ["click", { ref: 42, tabId: 42 }]]);
+  assert.equal(await app.call("find", { query: "save" }), '"save": found on this page (match 80%).\nline 13 (60%): [42] button "Save"');
+  assert.equal(http.seen.length, 5);
+  for (const { method, path, headers, body } of http.seen) {
+    assert.equal(method, "POST");
+    assert.equal(path, "/v1/chat/completions");
+    assert.equal(headers.authorization, undefined);
+    assert.equal(headers["content-type"], "application/json");
+    const { messages, max_tokens, ...args } = body;
+    assert.deepEqual(args, { model: "local-test", temperature: 0, logprobs: true, top_logprobs: 20 });
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0].role, "user");
+    assert.match(messages[0].content, /Tab 42: Sample .*\[42\] button "Save"/s);
+    if (max_tokens === 4) assert.match(messages[0].content, /^1 = L1\n(?:.*\n)*12 = L12$/m);
+    else {
+      assert.equal(max_tokens, 1);
+      assert.match(messages[0].content, /Your answer \(no or yes\):/);
+      assert.match(messages[0].content, /^no — .+\nyes — .+$/m);
+    }
+  }
+  failure = "missing";
+  await assert.rejects(app.call("find", { query: "save" }), { message: `The decision model at ${baseUrl} (local-test) did not return token probabilities. Use a model and server that return logprobs, with thinking turned off.` });
+  failure = "invalid";
+  await assert.rejects(app.call("click", { target: "save button" }), /returned "Save" instead of a valid option label/);
+  assert.deepEqual(requests.map(req => req.method), ["read", "click", "read", "read", "read"]);
 });

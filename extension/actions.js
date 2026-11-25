@@ -3,16 +3,17 @@ import { checkDebugger, evaluatePage, frameTree, runtimeValue, sleep, withTab } 
 import { browser, version } from './transport.js';
 import { frameURL, snapshot } from './snapshot.js';
 import * as input from './input.js';
+import { allowedHosts, coversHost, webHost } from './allowed.js';
+import { checkPower } from './power.js';
 
-function webURL(value) {
-  let url;
-  try { url = new URL(value); } catch {}
-  if (url?.protocol !== 'http:' && url?.protocol !== 'https:') throw new Error('Only http: and https: pages are supported.');
-  return url;
+function requireWebHost(value) {
+  const host = webHost(value);
+  if (!host) throw new Error('Only http: and https: pages are supported.');
+  return host;
 }
 
 function authorize(host, allowed, acted) {
-  if (!allowed.has(host)) throw Object.assign(new Error(`Approval is required to use ${host}.`), {
+  if (!coversHost(allowed, host)) throw Object.assign(new Error(`Approval is required to use ${host}.`), {
     code: 'needs-approval', host, acted,
   });
 }
@@ -25,7 +26,7 @@ function configure(ctx, allowed, method) {
     ctx.tree = await frameTree(ctx);
     const url = ctx.tree.frame.url;
     if (!(method === 'navigate' && url === 'about:blank' && !ctx.state.commits)) {
-      authorize(webURL(url).hostname, allowed, ctx.acted);
+      authorize(requireWebHost(url), allowed, ctx.acted);
     }
   };
   ctx.allowed = allowed;
@@ -38,7 +39,7 @@ function configure(ctx, allowed, method) {
     }
     const origin = frame.securityOrigin;
     if (!origin || origin === 'null' || origin === '://') throw new Error('Cannot determine the frame origin for this action.');
-    authorize(webURL(origin).hostname, allowed, ctx.acted);
+    authorize(requireWebHost(origin), allowed, ctx.acted);
   };
   ctx.method = method;
 }
@@ -94,7 +95,7 @@ async function history(ctx, direction) {
     const { currentIndex, entries } = await ctx.send('Page.getNavigationHistory');
     const index = currentIndex + (direction === 'back' ? -1 : 1);
     if (!entries[index] || (index === 0 && entries[index].url === 'about:blank')) throw new Error(`Tab ${ctx.id} has no page to go ${direction} to.`);
-    webURL(entries[index].url);
+    requireWebHost(entries[index].url);
     ctx.acted = true;
     await ctx.send('Page.navigateToHistoryEntry', { entryId: entries[index].id });
   }
@@ -215,11 +216,9 @@ function dataURL(value) {
 function network(ctx) {
   const lines = [];
   let hidden = 0;
-  for (const { method, status, type, url, host, origin } of ctx.state.network) {
-    let frameHost;
-    try { frameHost = new URL(origin).hostname; } catch {}
+  for (const { method, status, type, url, origin } of ctx.state.network) {
     const data = url.startsWith('data:');
-    if (!ctx.allowed.has(frameHost) || (!data && !ctx.allowed.has(host))) hidden++;
+    if (!coversHost(ctx.allowed, webHost(origin)) || (!data && !coversHost(ctx.allowed, webHost(url)))) hidden++;
     else lines.push(`${method} ${status} ${type} ${data ? dataURL(url) : url}`);
   }
   if (hidden) lines.push(`${hidden} requests to sites you haven't approved are hidden.`);
@@ -276,13 +275,13 @@ async function getTab(session, name, method, params) {
 }
 
 export async function request({ session, name, method, params = {}, allowed, count = 0 }) {
-  if (method === 'status') return { text: `Pi Browser ${version} · ${browser} · ${count} sessions` };
+  if (method === 'status') return { text: `Pi Browser ${version} · ${browser} · ${count} ${count === 1 ? 'session' : 'sessions'}` };
   if (method === 'tabs') return groups.list(session);
   if (method !== 'close' && !Object.hasOwn(handlers, method)) throw new Error(`Unknown browser method: ${method}.`);
   validate(method, params);
   await checkDebugger();
-  const hosts = new Set(Array.isArray(allowed) ? allowed : []);
-  if (method === 'navigate') authorize(webURL(params.url).hostname, hosts, false);
+  const hosts = allowedHosts(allowed);
+  if (method === 'navigate') authorize(requireWebHost(params.url), hosts, false);
   const tab = await getTab(session, name, method, params);
   const response = await groups.action(session, () => withTab(tab, session, async ctx => {
     configure(ctx, hosts, method);
@@ -301,6 +300,7 @@ export async function request({ session, name, method, params = {}, allowed, cou
   }));
   if (method !== 'close') return response;
   await groups.tabFor(session, tab.id);
+  checkPower();
   await chrome.tabs.remove(tab.id);
   return { text: `Closed tab ${tab.id}.` };
 }

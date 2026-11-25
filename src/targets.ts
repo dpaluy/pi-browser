@@ -1,4 +1,5 @@
-import { isElement, locate, resolved, RESOLVE, verdict, type Hit, type Located } from "./jev.ts";
+import type { DecisionModel } from "./decision.ts";
+import { isElement, locate, resolved, RESOLVE, verdict, type Hit, type Located } from "./locate.ts";
 
 const percent = (score: number) => `${Math.round(score * 100)}%`;
 const candidate = (lines: string[], hit: Hit) => `line ${hit.line + 1} (${percent(hit.score)}): ${lines[hit.line]}`;
@@ -24,14 +25,14 @@ export function resolveTarget(lines: string[], target: string, match: Located): 
   throw new Error([message, ...hits.slice(0, 3).map(hit => candidate(lines, hit))].join("\n"));
 }
 
-export async function find(text: string, query: string, key: string, signal?: AbortSignal): Promise<string> {
+export async function find(text: string, query: string, model: DecisionModel, signal?: AbortSignal): Promise<string> {
   const lines = text.split("\n");
-  const [match] = await locate(lines, [{ text: query, kind: "content" }], key, signal);
+  const [match] = await locate(lines, [{ text: query, kind: "content" }], model, signal);
   return formatFind(lines, query, match);
 }
 
-export async function matchTargets(text: string, targets: string[], key: string, signal?: AbortSignal) {
+export async function matchTargets(text: string, targets: string[], model: DecisionModel, signal?: AbortSignal) {
   const lines = text.split("\n");
-  const matches = await locate(lines, targets.map(text => ({ text, kind: "element" })), key, signal);
+  const matches = await locate(lines, targets.map(text => ({ text, kind: "element" })), model, signal);
   return matches.map((match, index) => resolveTarget(lines, targets[index], match));
 }

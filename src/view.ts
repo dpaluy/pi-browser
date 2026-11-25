@@ -1,5 +1,5 @@
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
-import { isElement } from "./jev.ts";
+import { isElement } from "./locate.ts";
 
 export function view(text: string, offset = 0, interactive = false): string {
   const lines = text === "" ? [] : text.replace(/\n$/, "").split("\n");

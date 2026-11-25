@@ -1,16 +1,10 @@
-// Semantic lookup over a page snapshot with TypeSafe's Jev (https://docs.typesafe.ai/api).
-// Each line of the snapshot gets an id; one Choice question per query ranks the candidate lines,
-// a companion Noul question says whether any line matches at all, since Choice
-// probabilities always sum to 1 (https://docs.typesafe.ai/patterns/companion-noul), and for elements
-// a second Noul says whether the description fits several, since Choice puts its peak on one of equals.
+import type { DecisionModel, Question } from "./decision.ts";
 
-export const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
-export const MODEL = "jev-latest";
-// A Choice question takes at most 255 options; Jev reads 32k tokens per question by default.
+// Choice ranks the lines; a companion noul tests whether any line matches at all.
+// For elements a second noul tests whether the description fits multiple elements.
 export const MAX_OPTIONS = 250;
 export const MAX_CHUNK_BYTES = 40_000;
 const LINE_CHARS = 300;
-const TIMEOUT_MS = 30_000;
 const CONCURRENCY = 4;
 
 export interface Query {
@@ -70,7 +64,7 @@ export function chunks(lines: string[], candidate: (line: string) => boolean, ma
   return result;
 }
 
-function questions(query: Query, index: number, options: string[]): Record<string, unknown> {
+function questions(query: Query, index: number, options: string[]): Record<string, Question> {
   const element = query.kind === "element";
   return {
     [`where${index}`]: {
@@ -78,46 +72,25 @@ function questions(query: Query, index: number, options: string[]): Record<strin
       instructions: element
         ? `\`page\` is a web page's accessibility tree, one line per id; lines with a [number] are elements a user can act on. Which element should be used for: "${query.text}"?`
         : `\`page\` is a web page's accessibility tree, one line per id. Which line best answers or matches: "${query.text}"?`,
-      criteria: Object.fromEntries(options.map(option => [option, null])),
+      options,
     },
     [`exists${index}`]: {
       type: "noul",
       instructions: element
         ? `\`page\` is a web page's accessibility tree; lines with a [number] are elements a user can act on. Does \`page\` include such an element that fits: "${query.text}"?`
         : `\`page\` is a web page's accessibility tree. Does any line of \`page\` answer or match: "${query.text}"?`,
-      criteria: element
-        ? { true: "A line with a [number] is clearly the element described", false: "No line with a [number] is the element described" }
-        : { true: "At least one line states, shows, or directly matches it", false: "No line addresses it" },
+      yes: element ? "A line with a [number] is clearly the element described" : "At least one line states, shows, or directly matches it",
+      no: element ? "No line with a [number] is the element described" : "No line addresses it",
     },
     ...(element ? {
       [`ambiguous${index}`]: {
         type: "noul",
         instructions: `\`page\` is a web page's accessibility tree; lines with a [number] are elements a user can act on. Could "${query.text}" reasonably mean two or more different elements in \`page\`?`,
-        criteria: { true: "Two or more [number] lines fit the description about equally well, so it is unclear which one is meant", false: "At most one [number] line fits; the description singles it out" },
+        yes: "Two or more [number] lines fit the description about equally well, so it is unclear which one is meant",
+        no: "At most one [number] line fits; the description singles it out",
       },
     } : {}),
   };
-}
-
-interface Answer {
-  noul?: number;
-  probabilities?: Record<string, number>;
-}
-
-async function post(body: unknown, key: string, signal?: AbortSignal, retried = false): Promise<Record<string, Answer>> {
-  const response = await fetch(ENDPOINT, {
-    method: "POST",
-    headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-    body: JSON.stringify(body),
-    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT_MS)]) : AbortSignal.timeout(TIMEOUT_MS),
-  });
-  if (response.status === 429 && !retried) {
-    const wait = Math.min(Number(response.headers.get("retry-after")) || 1, 10);
-    await new Promise(resolve => setTimeout(resolve, wait * 1000));
-    return post(body, key, signal, true);
-  }
-  if (!response.ok) throw new Error(`TypeSafe answered HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
-  return (await response.json() as { answers: Record<string, Answer> }).answers;
 }
 
 async function pool<T, R>(items: T[], run: (item: T) => Promise<R>): Promise<R[]> {
@@ -133,7 +106,7 @@ async function pool<T, R>(items: T[], run: (item: T) => Promise<R>): Promise<R[]
 }
 
 // Ranks the snapshot's lines for each query. lines[0] is the tab's header line.
-export async function locate(lines: string[], queries: Query[], key: string, signal?: AbortSignal): Promise<Located[]> {
+export async function locate(lines: string[], queries: Query[], model: DecisionModel, signal?: AbortSignal): Promise<Located[]> {
   const [header, ...body] = lines;
   const kinds = [...new Set(queries.map(query => query.kind))];
   const candidate = (line: string) => kinds.includes("content") ? line.trim() !== "" : isElement(line);
@@ -146,11 +119,11 @@ export async function locate(lines: string[], queries: Query[], key: string, sig
       return { query, index, options };
     }).filter(({ options }) => options.length);
     if (!asked.length) return;
-    const answers = await post({
-      model: MODEL,
-      state: { tab: header, page },
-      questions: Object.assign({}, ...asked.map(({ query, index, options }) => questions(query, index, options))),
-    }, key, signal);
+    const answers = await model.ask(
+      { tab: header, page },
+      Object.assign({}, ...asked.map(({ query, index, options }) => questions(query, index, options))),
+      signal,
+    );
     for (const { index } of asked) {
       const exists = answers[`exists${index}`]?.noul ?? 0;
       const result = results[index];

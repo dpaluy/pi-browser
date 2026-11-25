@@ -1,6 +1,7 @@
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
-import { detectBrowserDirs, EXTENSION_DIR, EXTENSION_ID, installHost } from "./install.ts";
+import { decisionModel, type DecisionModel } from "./decision.ts";
+import { detectBrowserDirs, EXTENSION_DIR, installHost } from "./install.ts";
 import { SessionServer } from "./server.ts";
 import { settingsStore } from "./settings.ts";
 import { browserTool } from "./tool.ts";
@@ -8,10 +9,12 @@ import { browserTool } from "./tool.ts";
 export interface BrowserOptions {
   agentDir?: string;
   browserDirs?: string[];
-  typesafeKey?: string;
+  env?: Record<string, string | undefined>;
   connectTimeoutMs?: number;
   requestTimeoutMs?: number;
 }
+
+const STATUS_WAIT_MS = 5_000;
 
 const interactive = (ctx: ExtensionContext) => ctx.hasUI && ctx.mode === "tui";
 
@@ -38,11 +41,14 @@ export function browserExtension(options: BrowserOptions = {}): (pi: ExtensionAP
       return session;
     };
 
+    // The model and its tool schema are selected together from disk on startup (and on /reload).
+    let configured: Promise<DecisionModel | undefined> | undefined;
+    const model = () => configured ??= store.load().then(settings => decisionModel(settings, options.env ?? process.env));
     let registered = false;
-    pi.on("session_start", (_event, ctx) => {
+    pi.on("session_start", async (_event, ctx) => {
       if (!interactive(ctx) || registered) return;
       pi.registerTool(browserTool({ store, start, connectTimeoutMs, requestTimeoutMs: options.requestTimeoutMs,
-        key: options.typesafeKey ?? process.env.TYPESAFE_API_KEY }));
+        decision: await model() }));
       registered = true;
     });
     pi.on("session_shutdown", async (_event, ctx) => {
@@ -53,27 +59,42 @@ export function browserExtension(options: BrowserOptions = {}): (pi: ExtensionAP
       await session?.server.close();
     });
     pi.registerCommand("browser", {
-      description: "Install and connect Pi Browser, change eval confirmation, or manage allowed sites.",
+      description: "Do a task in your browser (/browser <task>), check the connection, or change settings (/browser settings, /browser sites).",
+      getArgumentCompletions: prefix => ["settings", "sites"].filter(name => name.startsWith(prefix.trim()))
+        .map(name => ({ value: name, label: name })),
       async handler(raw, ctx) {
         if (!interactive(ctx)) return;
         try {
-          switch (raw.trim()) {
+          const task = raw.trim();
+          switch (task) {
             case "": {
+              const decision = await model();
               const installed = install();
               const manifests = await installed;
               const { server } = await start(ctx, installed);
+              // The relay notices a new session socket shortly after it opens; report the status once it has.
+              await server.connect(Math.min(connectTimeoutMs, STATUS_WAIT_MS)).catch(() => {});
               ctx.ui.notify([
-                `Extension folder: ${EXTENSION_DIR}`,
-                `Extension ID: ${EXTENSION_ID}`,
                 server.status,
+                // The folder is only needed to load the extension, so it is shown only while it isn't connected.
+                ...(server.connected ? [] : [`Extension folder: ${EXTENSION_DIR}`]),
                 ...(manifests.length ? [] : ["No supported browser data folders were found."]),
+                `Decision model: ${decision?.label ?? "none (find and target are off)"}`,
               ].join("\n"), "info");
               break;
             }
             case "settings": {
-              const { confirmEval } = await store.load();
-              const toggle = confirmEval ? "Turn off eval confirmation" : "Turn on eval confirmation";
-              if (await ctx.ui.select(`Browser eval confirmation is ${confirmEval ? "on" : "off"}.`, [toggle, "Cancel"]) === toggle) {
+              const { approveSites, confirmEval } = await store.load();
+              const sites = approveSites ? "Stop asking before new sites" : "Ask before the agent uses a new site";
+              const evals = confirmEval ? "Run page JavaScript without asking" : "Ask before running page JavaScript";
+              const choice = await ctx.ui.select([
+                `Site approval is ${approveSites ? "on" : "off"}; eval confirmation is ${confirmEval ? "on" : "off"}.`,
+              ].join("\n"), [sites, evals, "Cancel"]);
+              if (choice === sites) {
+                await store.update(settings => { settings.approveSites = !approveSites; });
+                ctx.ui.notify(approveSites ? "The browser now works on any site without asking."
+                  : "Pi now asks before the browser acts on a site you haven't allowed.", "info");
+              } else if (choice === evals) {
                 await store.update(settings => { settings.confirmEval = !confirmEval; });
                 ctx.ui.notify(`Browser eval confirmation is now ${confirmEval ? "off" : "on"}.`, "info");
               }
@@ -92,7 +113,11 @@ export function browserExtension(options: BrowserOptions = {}): (pi: ExtensionAP
               }
               break;
             }
-            default: ctx.ui.notify("Usage: /browser [settings|sites]", "warning");
+            default: {
+              const prompt = `Use the browser tool, which works in my own Chrome or Brave, for this: ${task}`;
+              if (ctx.isIdle()) pi.sendUserMessage(prompt);
+              else pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+            }
           }
         } catch (error) {
           ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
