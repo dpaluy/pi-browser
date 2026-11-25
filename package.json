@@ -1,6 +1,6 @@
 {
   "name": "@dpaluy/pi-browser",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Let Pi work in your signed-in Chrome or Brave, in tabs of its own, in the background.",
   "type": "module",
   "license": "MIT",

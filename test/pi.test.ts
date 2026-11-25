@@ -3,7 +3,7 @@ import { createAgentSession, DefaultResourceLoader, DEFAULT_MAX_BYTES, DEFAULT_M
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createConnection } from "node:net";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -317,6 +317,18 @@ test("/browser <task> asks the agent to do the task with the browser tool", { ti
     source: "extension",
   }]);
   assert.deepEqual(app.notifications, []);
+});
+
+test("tab group name: project folder and short ID until the session is named", { timeout: 8000 }, async t => {
+  const root = await fixture(t, false);
+  const app = await pi(t, root);
+  const requests = await browserPeer(t, app, () => reply());
+  await app.call("read");
+  const id = app.session.sessionManager.getSessionId();
+  assert.equal(requests.at(-1)?.name, `${basename(root)} · ${id.slice(0, 4)}`);
+  app.session.sessionManager.appendSessionInfo("LinkedIn research");
+  await app.call("read");
+  assert.equal(requests.at(-1)?.name, "LinkedIn research");
 });
 
 test("view resumes after the last shown raw line in full and interactive pages", () => {

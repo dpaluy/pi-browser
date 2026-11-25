@@ -99,7 +99,7 @@ function receive(message) {
       return;
     }
     ready = true;
-    send({ hello: { protocol: PROTOCOL, relay: "0.2.0" } });
+    send({ hello: { protocol: PROTOCOL, relay: "0.2.1" } });
     try {
       watcher = watch(dir, scan).on("error", error => stop(error.message));
     } catch (error) {

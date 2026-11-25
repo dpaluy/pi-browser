@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 - 2026-11-24
+
+### Changed
+
+- Tab groups of unnamed sessions are titled with the project folder and a short session ID instead of the full ID.
+
 ## 0.2.0 - 2026-11-24
 
 ### Added

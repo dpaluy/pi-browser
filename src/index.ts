@@ -1,5 +1,5 @@
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { decisionModel, type DecisionModel } from "./decision.ts";
 import { detectBrowserDirs, EXTENSION_DIR, installHost } from "./install.ts";
 import { SessionServer } from "./server.ts";
@@ -18,6 +18,12 @@ const STATUS_WAIT_MS = 5_000;
 
 const interactive = (ctx: ExtensionContext) => ctx.hasUI && ctx.mode === "tui";
 
+// The tab group shows the session's name, or for an unnamed session its project folder and the start of its ID,
+// so two unnamed sessions in one folder stay distinguishable.
+export function groupName(session: Pick<ExtensionContext["sessionManager"], "getSessionId" | "getSessionName" | "getCwd">): string {
+  return session.getSessionName() || `${basename(session.getCwd()) || session.getCwd()} · ${session.getSessionId().slice(0, 4)}`;
+}
+
 export function browserExtension(options: BrowserOptions = {}): (pi: ExtensionAPI) => void {
   return pi => {
     const data = join(options.agentDir ?? getAgentDir(), "browser");
@@ -32,7 +38,7 @@ export function browserExtension(options: BrowserOptions = {}): (pi: ExtensionAP
       if (!session) {
         session = (async () => {
           await (installed ?? install());
-          const server = await SessionServer.open(sockets, id, () => ctx.sessionManager.getSessionName() || id);
+          const server = await SessionServer.open(sockets, id, () => groupName(ctx.sessionManager));
           return { server, hosts: new Set<string>() };
         })();
         sessions.set(id, session);
